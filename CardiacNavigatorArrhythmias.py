@@ -1,14 +1,18 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import pyedflib
 from datetime import timedelta as td
 import os
 import Filtering
 from OrphanidouQC import run_orphanidou
 from BittiumFarosNonwear import BittiumNonwear
+import random
+from fpdf import FPDF
 
 os.chdir("O:/OBI/Personal Folders/Kyle Weber/Cardiac Navigator Investigation/")
+xfmt = mdates.DateFormatter("%Y/%m/%d\n%H:%M:%S")
 
 
 def import_arrhythmia_events(file, start_time, sample_f, file_dur):
@@ -233,6 +237,8 @@ def plot_arrhythmias(df_event, signal, timestamps, downsample=3,
         # Triangle markers for visibility
         axes.scatter(row.Timestamp + td(seconds=row.Duration/2), max_val*1.1, marker="v", color=color_dict[row.Type])
 
+    plt.title(types)
+
 
 """ ================================================ DATA IMPORT ================================================= """
 
@@ -297,7 +303,95 @@ df_valid_nw, desc_arrhyth_nw = remove_nonwear(events_df=df_events, df_nw=nw.nw_e
 df_valid, df_desc = combine_valid_dfs(df_nw=df_valid_nw, df_qc=df_valid_qc)
 
 
-# plot_arrhythmias(signal=filt, downsample=5, timestamps=ts, types=("Arrest"), df_event=df_events)
+def gen_sample_pdf(df_arrhythmia, img_folder="C:/Users/ksweber/Desktop/Images/", show_n_seconds=15,
+                   save_dir="C:/Users/ksweber/Desktop/", logo_link="C:/Users/ksweber/Desktop/HANDDS-logo.jpg",
+                   pad_short_events=True):
+
+    # list of detected arrhythmias
+    found_arrs = df_arrhythmia["Type"].unique()
+
+    img_list = []
+
+    # Loops each arrhythmia and generates a plot of a random event
+    for t in found_arrs:
+        n_events = int(df_desc.loc[t]["count"])
+        df_inds = df_valid.loc[df_valid["Type"] == t].index
+
+        # randomly picks one event if more than one event detected
+        if n_events > 1:
+            ind = random.choice(range(len(df_inds)))
+            row = df_inds[ind]
+
+        if n_events == 1:
+            ind = 0
+            row = df_inds[0]
+
+        d = df_valid.iloc[row]
+
+        # Cropping data
+        if d.Duration < show_n_seconds:
+            if pad_short_events:
+                pad = show_n_seconds - d.Duration
+            if not pad_short_events:
+                pad = 2
+            start_ind = int((d.Timestamp - start_stamp).total_seconds() * fs - pad/2 * fs)
+            stop_ind = int((d.Timestamp + td(seconds=d.Duration) - start_stamp).total_seconds() * fs + pad/2 * fs)
+
+        if d.Duration >= show_n_seconds:
+            midpoint_ind = int((d.Timestamp + td(seconds=d.Duration/2) - start_stamp).total_seconds() * fs)
+            start_ind = int((midpoint_ind - show_n_seconds / 2 * fs))
+            stop_ind = int(midpoint_ind + show_n_seconds / 2 * fs)
+
+        data = filt[start_ind:stop_ind]
+
+        plt.close("all")
+        fig, ax = plt.subplots(1, figsize=(7.5, 5.5))
+        plt.subplots_adjust(top=0.9, bottom=0.125, left=0.075, right=0.975, hspace=0.2, wspace=0.2)
+
+        ax.plot(ts[start_ind:stop_ind], data, color='black')
+        ax.fill_between(x=[d.Timestamp, d.Timestamp + td(seconds=d.Duration)], y1=min(data), y2=max(data),
+                        color='grey', alpha=.35)
+        show_lab = "full event" if d.Duration < show_n_seconds else "cropped"
+        ax.set_title("{}: start = {}, duration = {} "
+                     "seconds ({})\nEvent {}/{}, df row index {}".format(t, str(d.Timestamp.round("500ms"))[:-3],
+                                                                         round(d.Duration, 1), show_lab,
+                                                                         str(int(ind+1)), n_events, d.name))
+        ax.xaxis.set_major_formatter(xfmt)
+        plt.xticks(rotation=45, fontsize=8)
+
+        if d.Duration >= show_n_seconds:
+            ax.set_xlim(ts[start_ind], ts[stop_ind])
+
+        # Saves png file
+        t_name = t if t != "PAC/SVE" else "PACSVE"
+        plt.savefig(f"{img_folder}{t_name}.png", dpi=100)
+        img_list.append(f"{img_folder}{t_name}.png")
+
+    plt.close("all")
+
+    # Creates pdf from all png files
+    pdf = FPDF(orientation="L")  # "L" for landscape
+    pdf.add_page()
+    pdf.set_font("Arial", size=20)
+
+    if os.path.exists(logo_link):
+        pdf.image(name=logo_link, x=90, y=50, w=125)
+    pdf.set_font("Arial", size=12)
+
+    pdf.cell(200, 10, txt=f"Subject {subj}:", ln=1, align="L")
+    pdf.cell(200, 10, txt="Arrhythmia analysis", ln=2, align="L")
+    pdf.cell(200, 10, txt=f"-Found {df_arrhythmia.shape[0]} events", ln=3, align="L")
+
+    for img in img_list:
+        pdf.image(img)
+        os.remove(img)
+    pdf.output(f"{save_dir}{subj}.pdf")
+    print(f"\nPDF created (saved to {save_dir}).")
+
+
+gen_sample_pdf(df_arrhythmia=df_valid, show_n_seconds=10, pad_short_events=False)
+
+# plot_arrhythmias(signal=filt, downsample=5, timestamps=ts, types=("GEM", "GEM(mf)", "IVR"), df_event=df_valid)
 
 # Plotting ------------------------------------------------------------------------------------------------------------
 # df_use = df_rr.loc[(df_rr["Timestamp"] <= start_stamp + td(seconds=3600)) & (df_rr["Timestamp"] >= start_stamp + td(seconds=3585))]
