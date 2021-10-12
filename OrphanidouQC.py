@@ -1,6 +1,6 @@
 import pandas as pd
 
-from ecgdetectors import Detectors
+from ecgdetectors.ecgdetectors import Detectors
 # https://github.com/luishowell/ecg-detectors
 from matplotlib import pyplot as plt
 import numpy as np
@@ -10,6 +10,8 @@ import nwdata.NWData
 from Filtering import filter_signal
 import random
 import datetime
+import pyedflib
+from datetime import timedelta
 
 
 class CheckQuality:
@@ -316,9 +318,10 @@ class CheckQuality:
             self.rule_check_dict["Accel SD"] = sd
 
 
-def run_orphanidou(signal, sample_rate, epoch_len, volt_thresh=250):
+def run_orphanidou(signal, sample_rate, epoch_len, volt_thresh=250, quiet=True):
 
-    print("\nRunning Orphanidou et al. 2015 quality check algorithm...")
+    if not quiet:
+        print("\nRunning Orphanidou et al. 2015 quality check algorithm...")
 
     percent_markers = np.arange(0, len(signal)*1.1, len(signal)/20)
     index = 0
@@ -329,9 +332,10 @@ def run_orphanidou(signal, sample_rate, epoch_len, volt_thresh=250):
     removed_rpeaks = []
 
     for i in range(0, len(signal), int(sample_rate * epoch_len)):
-        if i >= percent_markers[index]:
-            print(f"-{index*5}% complete")
-            index += 1
+        if not quiet:
+            if i >= percent_markers[index]:
+                print(f"-{index*5}% complete")
+                index += 1
 
         try:
             d = CheckQuality(raw_data=signal, sample_rate=sample_rate, start_index=i,
@@ -348,7 +352,8 @@ def run_orphanidou(signal, sample_rate, epoch_len, volt_thresh=250):
             orphanidou.append("Error")
             errors.append(i)
 
-    print("Complete.")
+    if not quiet:
+        print("Complete.")
 
     output = {"Validity": orphanidou, "ErrorEpochs": errors, "R_Peaks": rpeaks, "Removed_RPeaks": removed_rpeaks}
 
@@ -361,59 +366,168 @@ def run_orphanidou(signal, sample_rate, epoch_len, volt_thresh=250):
     # 10-beat rolling mean HR
     output["RollMeanHR"] = [60/np.mean(output["RR_ints"][i:i+10]) for i in range(len(output["RR_ints"])-10)]
 
-    print("\nData is {}% valid".format(round(100*output["Validity"].count("Valid")/len(output["Validity"]), 2)))
+    if not quiet:
+        print("\nData is {}% valid".format(round(100*output["Validity"].count("Valid")/len(output["Validity"]), 2)))
 
-    return output
+    df = pd.DataFrame({"Index": np.arange(0, len(signal), int(sample_rate * epoch_len)),
+                       "Orphanidou": output["Validity"]})
 
-"""
-fs = 250
-epoch_len = 15
-
-ecg = nwdata.NWData()
-ecg.import_bitf(file_path="/Users/kyleweber/Desktop/009_OmegaSnap.EDF", quiet=False)
-ind = ecg.get_signal_index("ECG")
-f = filter_signal(data=ecg.signals[ind], sample_f=ecg.signal_headers[ind]["sample_rate"],
-                  filter_type='bandpass', low_f=.67, high_f=25, filter_order=3)
-
-data = {'Timestamp': pd.date_range(start=ecg.header["startdate"], periods=len(ecg.signals[ind]),
-                                   freq="{}ms".format(1000/ecg.signal_headers[ind]["sample_rate"])),
-        "Raw": ecg.signals[ind],
-        "Filtered": filter_signal(data=ecg.signals[ind], sample_f=ecg.signal_headers[ind]["sample_rate"],
-                                  filter_type='bandpass', low_f=.67, high_f=25, filter_order=3)}"""
-
-# signal = data["Filtered"]
-# del data, ecg
-
-t0 = datetime.datetime.now()
-# output = run_orphanidou(signal=f, sample_rate=fs, epoch_len=epoch_len)
-print((datetime.datetime.now() - t0).total_seconds())
-
-"""
-# Saving output of Orphanidou algorithm
-df = pd.DataFrame({"Index": np.arange(0, len(f), int(fs * epoch_len)), "Orphanidou": output["Validity"]})
-df.to_csv("/Users/kyleweber/Desktop/009_Orphanidou.csv", index=False)
-
-df_hr = pd.DataFrame({"Peaks": output["AllPeaks"][:len(output["RollMeanHR"])], "Roll10HR": output["RollMeanHR"]})
-df_hr.to_csv('/Users/kyleweber/Desktop/009_Peaks_HR.csv', index=False)
-"""
-
-# peaks = pd.read_csv("/Users/kyleweber/Desktop/008_Peaks_HR.csv")
-# orph = pd.read_csv("/Users/kyleweber/Desktop/008_Orphanidou.csv")
+    return df, output
 
 
-def plot_everything(signal, output, ds_ratio=5, fs=250, epoch_len=15, include_epoch_lines=False):
+def format_nonwear():
+    df_nw = pd.read_excel("C:/Users/ksweber/Desktop/OmegaSnap_Nonwear.xlsx")
+    df_nw["Subj"] = [subj in i for i in df_nw["File"]]
+    df_nw = df_nw.loc[df_nw["Subj"]]
 
-    x_epoch = [i*epoch_len+epoch_len/2 for i in np.arange(len(output["Validity"]))]
+    epoch_nw = np.zeros(int(len(f)/fs/epoch_len))
+
+    # Assigns moderate intensity (2) to all gait bouts
+    for row in df_nw.itertuples():
+        start = int((row.Start - start_stamp).total_seconds() / epoch_len)
+        stop = int((row.Stop - start_stamp).total_seconds() / epoch_len)
+        epoch_nw[start:stop] = 1
+
+    df_epoch_nw = pd.DataFrame({"Timestamp": pd.date_range(start=start_stamp, periods=len(epoch_nw), freq=f"{epoch_len}S"),
+                                "Nonwear": epoch_nw})
+
+    return df_epoch_nw
+
+
+def calculate_validity_summary(nonwear_data=None, show_plot=False):
+    start_hour = pd.to_datetime(start_stamp).round("1H")
+    end_hour = pd.to_datetime((start_stamp + timedelta(seconds=len(ecg)/fs))).round("1H") + timedelta(hours=1)
+    hour_stamps = pd.date_range(start=start_hour, end=end_hour, freq='1H')
+
+    orph["Timestamp"] = pd.date_range(start=start_stamp, periods=orph.shape[0], freq=f"{epoch_len}S")
+
+    if nonwear_data is not None:
+        perc_valid = []
+        perc_nw = []
+        for hour1, hour2 in zip(hour_stamps[:], hour_stamps[1:]):
+            # Locates correct sections of dataframes based on hour
+            qc = orph.loc[(orph["Timestamp"] >= hour1) & (orph['Timestamp'] <= hour2)]
+            nw = df_nw.loc[(df_nw["Timestamp"] >= hour1) & (df_nw['Timestamp'] <= hour2)]
+
+            df_both = pd.DataFrame({"Orphanidou": qc["Orphanidou"], "NW": nw["Nonwear"]})
+
+            df_wear = df_both.loc[df_both["NW"] == 0]
+            df_valid = df_wear.loc[df_wear['Orphanidou'] == "Valid"]
+
+            try:
+                p_valid = round(df_valid.shape[0]*100/df_wear.shape[0], 2)
+            except ZeroDivisionError:
+                p_valid = None
+
+            perc_valid.append(p_valid)
+
+            try:
+                perc_nw.append(round(100*(nw.shape[0]-df_wear.shape[0])/nw.shape[0], 1))
+            except ZeroDivisionError:
+                perc_nw.append(None)
+
+        data_len = min([len(hour_stamps), len(perc_valid), len(perc_nw)])
+
+        df_hourly = pd.DataFrame({"Timestamp": hour_stamps[:data_len],
+                                  "PercValid": perc_valid[:data_len],
+                                  "PercNW": perc_nw[:data_len]})
+
+        df_both_all = pd.DataFrame({"Orphanidou": orph["Orphanidou"], "NW": nonwear_data["Nonwear"]})
+
+        # Calculates total validity
+        valid_all = df_both_all.loc[(df_both_all["Orphanidou"] == "Valid") & (df_both_all["NW"] == 0)].shape[0]
+        perc_valid_all = round((100*valid_all/df_both_all.shape[0]), 2)
+        print(f"Valid data (NW excluded) = {perc_valid_all}%")
+
+    if nonwear_data is None:
+        perc_valid = []
+
+        for hour1, hour2 in zip(hour_stamps[:], hour_stamps[1:]):
+            # Locates correct sections of dataframes based on hour
+            qc = orph.loc[(orph["Timestamp"] >= hour1) & (orph['Timestamp'] <= hour2)]
+
+            df_valid = qc.loc[qc['Orphanidou'] == "Valid"]
+            p_valid = round(df_valid.shape[0] * 100 / qc.shape[0], 2)
+            perc_valid.append(p_valid)
+
+        data_len = min([len(hour_stamps), len(perc_valid)])
+
+        df_hourly = pd.DataFrame({"Timestamp": hour_stamps[:data_len],
+                                  "PercValid": perc_valid[:data_len],
+                                  "PercNW": [None for i in range(data_len)]})
+
+        # Calculates total validity
+        valid_all = orph.loc[orph["Orphanidou"] == "Valid"].shape[0]
+        perc_valid_all = round((100*valid_all/orph.shape[0]), 2)
+        print(f"Valid data (NW included) = {perc_valid_all}%")
+
+    if show_plot:
+        fig, ax = plt.subplots(1, figsize=(10, 6))
+        ax.plot(df_hourly["Timestamp"], df_hourly["PercValid"], color='red', label='Hourly QC')
+        plt.suptitle(f"OND_{subj}: Orphanidou Quality + Nonwear" if nonwear_data is not None else
+                     f"OND_{subj}: Orphanidou Quality")
+        ax.set_ylabel("%")
+        ax.set_ylim(-1, 101)
+        ax.set_yticks(np.arange(0, 105, 20))
+        ax.axhline(y=perc_valid_all, color='red', linestyle='dashed', label="Total % Valid")
+
+        axx = ax.twiny()
+        axx.plot(np.arange(df_hourly.shape[0]), df_hourly["PercValid"], linestyle="")
+        axx.set_xlabel("Hours")
+
+        if nonwear_data is not None:
+            ax.plot(df_hourly["Timestamp"], df_hourly["PercNW"], color='black', label='Nonwear')
+        ax.legend()
+
+    return df_hourly, fig if show_plot else None
+
+
+def plot_everything(signal, output=None, start_time=None, ds_ratio=5, fs=250, epoch_len=15, include_epoch_lines=False):
+
     x_raw = np.arange(len(signal))/fs
 
-    fig, axes = plt.subplots(4, sharex='col', figsize=(10, 6))
-    axes[0].plot(x_raw[::ds_ratio], signal[::ds_ratio], color='black', label='Filtered', zorder=0)
-    axes[0].scatter([x_raw[i] for i in output["R_Peaks"]], [signal[i] for i in output["R_Peaks"]],
-                    color='limegreen', marker="o", zorder=1)
+    if output is not None:
+        x_epoch = [i*epoch_len+epoch_len/2 for i in np.arange(len(output["Validity"]))]
+    if output is None:
+        x_epoch = [i*epoch_len+epoch_len/2 for i in np.arange(int(len(x_raw)/fs/epoch_len))]
 
-    axes[0].scatter([x_raw[i] for i in output["Removed_RPeaks"]],
-                    [signal[i] for i in output["Removed_RPeaks"]],
-                    color='red', marker="x", zorder=1)
+    if start_time is not None:
+        x_raw = pd.date_range(start=start_time, periods=len(signal), freq="{}ms".format(1000/fs))
+        x_epoch = pd.date_range(start=start_time, periods=len(signal[::int(fs*epoch_len)]), freq="{}S".format(epoch_len))
+
+    fig, axes = plt.subplots(4, sharex='col', figsize=(14, 8))
+    axes[0].plot(x_raw[::ds_ratio], signal[::ds_ratio], color='black', label='Filtered', zorder=0)
+
+    if output is not None:
+        axes[0].scatter([x_raw[i] for i in output["R_Peaks"]], [signal[i] for i in output["R_Peaks"]],
+                        color='limegreen', marker="o", zorder=1)
+
+        axes[0].scatter([x_raw[i] for i in output["Removed_RPeaks"]], [signal[i] for i in output["Removed_RPeaks"]],
+                        color='red', marker="x", zorder=1)
+
+        axes[1].plot([i / fs for i in output["AllPeaks"][:len(output["RR_ints"])]] if start_time is None else
+                     [start_time + timedelta(seconds=i / fs) for i in output["AllPeaks"][:len(output["RR_ints"])]],
+                     output["RR_ints"],
+                     color='black', zorder=0, label="Raw RR")
+
+        axes[1].plot([i / fs for i in output["AllPeaks"][:len(output["RollMeanHR"])]] if start_time is None else
+                     [start_time + timedelta(seconds=i / fs) for i in output["AllPeaks"][:len(output["RollMeanHR"])]],
+                     output["RollMeanHR"], color='red', zorder=0, label="10-beat avg")
+        axes[1].legend(loc='lower left')
+        axes[1].set_ylim(0, 2.5)
+        axes[1].set_ylabel("RR-int (seconds)")
+
+        axes[2].plot([i / fs for i in output["AllPeaks"][:len(output["RollMeanHR"])]] if start_time is None else
+                     [start_time + timedelta(seconds=i / fs) for i in output["AllPeaks"][:len(output["RollMeanHR"])]],
+                     output["RollMeanHR"], color='red', label='10-beat avg')
+        axes[2].legend(loc='lower left')
+        axes[2].set_ylabel("BPM")
+
+        axes[3].plot(x_epoch, output["Validity"], color='dodgerblue', label="Orphanidou")
+        axes[3].legend(loc='lower left')
+
+        axes[3].set_xlabel("Seconds")
+
     axes[0].set_ylabel("Voltage")
     axes[0].legend(loc='lower left')
 
@@ -421,57 +535,10 @@ def plot_everything(signal, output, ds_ratio=5, fs=250, epoch_len=15, include_ep
         for i in np.arange(0, len(signal), int(fs*epoch_len)):
             axes[0].axvline(x=i/fs, color='purple')
 
-    axes[1].plot([i/fs for i in output["AllPeaks"][:len(output["RR_ints"])]], output["RR_ints"],
-                 color='black', zorder=0, label="Raw RR")
-    axes[1].plot([i/fs for i in output["AllPeaks"][:len(output["RollMeanHR"])]], output["RollMeanHR"],
-                 color='red', zorder=0, label="10-beat avg")
-    axes[1].legend(loc='lower left')
-    axes[1].set_ylim(0, 2.5)
-    axes[1].set_ylabel("RR-int (seconds)")
-
-    axes[2].plot([i/fs for i in output["AllPeaks"][:len(output["RollMeanHR"])]], output["RollMeanHR"],
-                 color='red', label='10-beat avg')
-    axes[2].legend(loc='lower left')
-    axes[2].set_ylabel("BPM")
-
-    axes[3].plot(x_epoch, output["Validity"], color='dodgerblue', label="Orphanidou")
-    axes[3].legend(loc='lower left')
-
-    axes[3].set_xlabel("Seconds")
+    return fig
 
 
-# plot_everything(signal=ecg.signals[ind], output=output, ds_ratio=2, fs=fs, epoch_len=epoch_len, include_epoch_lines=False)
-
-
-def calculate_template_all(signal, peak_indexes, fs=250, show_plot=False):
-
-    qrs = []
-
-    l = int(fs/4)
-
-    for p in peak_indexes:
-        d = signal[p - l:p + l]
-
-        qrs.append(d)
-
-    avg_qrs = np.mean(qrs, axis=0)
-
-    if show_plot:
-        for beat in qrs:
-            plt.plot(np.arange(0, len(beat))/fs-.25, beat, color='black')
-        plt.plot(np.arange(0, len(avg_qrs))/fs-.25, avg_qrs, color='red', label='Avg QRS ({} beats)'.format(len(qrs)))
-        plt.legend()
-        plt.xlabel("Seconds")
-        plt.ylabel("Voltage")
-
-    return qrs, avg_qrs
-
-
-"""
-qrs, avg_qrs = calculate_template_all(signal=f[:int(1800*60)],
-                                      peak_indexes=[i for i in output["AllPeaks"] if i < int(1800*60)],
-                                      fs=fs, show_plot=True)
-"""
+# fig = plot_everything(signal=f, start_time=start_stamp, output=None, ds_ratio=4, fs=fs, epoch_len=epoch_len, include_epoch_lines=False)
 
 
 def gen_random_beat(peak_indexes, avg_qrs, pad_beats=1, peak_ind=None, fs=250, plot_r=False):
@@ -514,33 +581,46 @@ for i in range(len(peaks)-1):
     r.append(gen_random_beat(peak_ind=i, peak_indexes=peaks, avg_qrs=avg_qrs, fs=fs, pad_beats=1))
 """
 
-def template_data(signal, validity_data, peak_indexes, fs=250, epoch_len=15, show_plot=True):
+
+def template_data(signal, validity_data, peak_indexes, sample_f=250, epoch_len=15, show_plot=True):
+
+    print("\nCalculating QRS template...")
 
     # Creates array of each peak ± 125ms for all peaks in valid epochs
+
+    # Output data
     valid_qrs = []
     invalid_qrs = []
     valid_peak_vals = []
     invalid_peak_vals = []
 
-    min_peak_ind = 0
+    min_peak_ind = 0  # Crops peak index list with each iteration to speed things up
 
-    validity_data = list(validity_data)
-    peak_indexes = np.array(peak_indexes)
+    validity_data = list(validity_data)  # Epoched Orphanidou values
+    peak_indexes = np.array(peak_indexes)  # QRS peak values
 
     for i, validity in enumerate(validity_data):
-        raw_i = int(i*fs*epoch_len)
+        if i % 100 == 0:
+            print(f"-{int(100*i/len(validity_data))}%")
+        # Index of signal
+        raw_i = int(i*sample_f*epoch_len)
 
-        peaks = [p for p in peak_indexes[min_peak_ind:] if raw_i <= p < int(raw_i+fs*epoch_len)]
+        # Only includes peaks in correct epoch
+        peaks = [p for p in peak_indexes[min_peak_ind:] if raw_i <= p < int(raw_i + sample_f*epoch_len)]
         min_peak_ind = np.argmax(peak_indexes >= raw_i)
 
+        # Loops through peaks
         for p in peaks:
-            d = signal[p - int(fs/8):p + int(fs/8)]
+            # Crops data to peak +- 1/8th of second
+            d = signal[p - int(sample_f/8):p + int(sample_f/8)]
+
+            # Adds data to correct array based on validity
             if validity == "Valid":
-                valid_qrs.append(d)
-                valid_peak_vals.append(signal[p])
+                valid_qrs.append(d)  # window of data
+                valid_peak_vals.append(signal[p])  # voltage of peak
             if validity == "Invalid":
-                invalid_qrs.append(d)
-                invalid_peak_vals.append(signal[p])
+                invalid_qrs.append(d)  # window of data
+                invalid_peak_vals.append(signal[p])  # voltage of peak
 
     def plot_templates():
         # Average QRS shape
@@ -550,13 +630,17 @@ def template_data(signal, validity_data, peak_indexes, fs=250, epoch_len=15, sho
 
         fig, axes = plt.subplots(2, 2, sharey='row', figsize=(10, 6))
 
+        # Plots each window of data during valid epochs
         for beat in valid_qrs:
+
+            # Pearson R correlation between beat and template
             pearson_r = scipy.stats.pearsonr(beat, avg_valid_qrs)[0]
             valid_r.append(round(pearson_r, 3))
             axes[0][0].plot([i/fs - .125 for i in np.arange(0, int(fs/4))], beat,
                             color='green' if pearson_r >= .66 else 'black', zorder=0)
 
-        axes[0][0].plot([i/fs - .125 for i in np.arange(0, int(fs/4))], avg_valid_qrs, color='dodgerblue', lw=3, label='Avg')
+        axes[0][0].plot([i/sample_f - .125 for i in np.arange(0, int(sample_f/4))], avg_valid_qrs,
+                        color='dodgerblue', lw=3, label='Avg')
         axes[0][0].legend()
         axes[0][0].set_xlabel("Seconds")
         axes[0][0].axvline(x=0, linestyle='dotted', color='red')
@@ -567,10 +651,10 @@ def template_data(signal, validity_data, peak_indexes, fs=250, epoch_len=15, sho
             pearson_r = scipy.stats.pearsonr(beat, avg_valid_qrs)[0]
             invalid_r.append(round(pearson_r, 3))
 
-            axes[0][1].plot([i/fs - .125 for i in np.arange(0, int(fs/4))], beat,
+            axes[0][1].plot([i/sample_f - .125 for i in np.arange(0, int(sample_f/4))], beat,
                             color='green' if pearson_r >= .66 else 'black', zorder=0)
 
-        axes[0][1].plot([i/fs - .125 for i in np.arange(0, int(fs/4))], avg_valid_qrs,
+        axes[0][1].plot([i/sample_f - .125 for i in np.arange(0, int(sample_f/4))], avg_valid_qrs,
                         color='dodgerblue', lw=3, label="Avg")
         axes[0][1].legend()
         axes[0][1].axvline(x=0, linestyle='dotted', color='red')
@@ -589,15 +673,12 @@ def template_data(signal, validity_data, peak_indexes, fs=250, epoch_len=15, sho
     return valid_qrs, invalid_qrs, valid_peak_vals, invalid_peak_vals
 
 
-"""
-valid_qrs, invalid_qrs, valid_peak_vals, invalid_peak_vals = template_data(signal=f, 
-                                                                           fs=fs, epoch_len=epoch_len,
-                                                                           show_plot=False,
-                                                                           validity_data=orph['Orphanidou'],
-                                                                           peak_indexes=peaks["Peaks"])
-"""
+"""df, output = run_orphanidou(signal=ecg, sample_rate=250, epoch_len=15, volt_thresh=250, quiet=False)
 
+valid_qrs, invalid_qrs, valid_peak_vals, invalid_peak_vals = template_data(signal=f2,
+                                                                           sample_f=fs, epoch_len=epoch_len,
+                                                                           show_plot=True,
+                                                                           validity_data=df['Orphanidou'],
+                                                                           peak_indexes=output["AllPeaks"])
 
-
-# TODO
-# Correlate each peak with average template and surrounding peak amplitude to remove false positives
+template = np.mean(valid_qrs, axis=0)"""
