@@ -6,7 +6,6 @@ xfmt = mdates.DateFormatter("%Y/%m/%d\n%H:%M:%S")
 import pyedflib
 from datetime import timedelta as td
 import os
-import Filtering
 from BittiumFarosNonwear import BittiumNonwear
 import random
 from Filtering import filter_signal
@@ -38,7 +37,7 @@ def load_data(filepath_fmt, nonwear_file, gait_file, sleep_output_file):
     df_sleep_alg["start_time"] = pd.to_datetime(df_sleep_alg["start_time"])
     df_sleep_alg["end_time"] = pd.to_datetime(df_sleep_alg["end_time"])
 
-    f = filter_signal(data=ecg, sample_f=fs, filter_type='bandpass', filter_order=3, low_f=.5, high_f=30)
+    f = filter_signal(data=ecg, sample_f=fs, filter_type='bandpass', filter_order=3, low_f=.67, high_f=30)
 
     return ecg, f, start_stamp, ts, fs, df_nw, df_gait, df_sleep_alg, file_dur
 
@@ -75,16 +74,6 @@ class ArrhythmiaProcessor:
         self.df_qc_epochs = self.format_qc_data()
         self.df_nonwear = self.format_nonwear_data()
 
-        self.df_valid_arr_qc, self.df_desc_qc = self.remove_bad_quality(df_events=self.df_card_nav,
-                                                                        df_qc=self.df_qc_epochs,
-                                                                        show_boxplot=False)
-        self.df_valid_arr_nw, self.df_desc_nw = self.remove_nonwear(df_events=self.df_card_nav,
-                                                                    nw_bouts=self.df_nonwear,
-                                                                    show_boxplot=False)
-
-        if self.df_valid_arr_nw is not None and self.df_valid_arr_qc is not None:
-            self.df_valid, self.df_desc = self.combine_valid_dfs(show_boxplot=False)
-
     def format_card_nav_file(self):
 
         if self.df_card_nav is None:
@@ -103,6 +92,8 @@ class ArrhythmiaProcessor:
             df["Start_Ind"] = [int(row.Msec / 1000 * self.details["sample_rate"]) for row in df.itertuples()]
             df["Stop_Ind"] = [int(row.Start_Ind + row.Duration * self.details["sample_rate"]) for row in df.itertuples()]
             df = df[["Timestamp", "Start_Ind", "Stop_Ind", "Duration", "Type", "Info"]]
+
+            df["Type"] = [i if i != "AV2/II" else "AV2II" for i in df["Type"]]
 
         if type(self.df_card_nav) is pd.core.frame.DataFrame:
             df = self.df_card_nav
@@ -153,30 +144,6 @@ class ArrhythmiaProcessor:
                        "QRn", "QT", "ISO", "ST60", "ST80", "NOISE"]]
 
         return df_rr
-
-    def find_longqt(self):
-
-        print("\nFinding long QT beats...")
-        long_qt = arr.df_rr.loc[arr.df_rr["QT"] >= 500]
-        long_qt["Start_Ind"] = [int(i / 1000 * arr.details["sample_rate"]) for i in long_qt["Msec"]]
-
-        stamps = [i for i in long_qt["Timestamp"]]
-        start_inds = [i for i in long_qt["Start_Ind"]]
-        stop_inds = [int(start + (t2 - t1).total_seconds() * arr.details["sample_rate"]) for start, t1, t2 in
-                     zip(start_inds, stamps[:], stamps[1:])]
-        stop_inds.append(start_inds[-1])
-        long_qt["Stop_Ind"] = stop_inds
-        long_qt["Type"] = ["LongQT" for i in range(long_qt.shape[0])]
-        long_qt["Info"] = ["AUTOMATIC" for i in range(long_qt.shape[0])]
-        long_qt["Duration"] = [(stop - start) / arr.details["sample_rate"] for
-                               start, stop in zip(start_inds, stop_inds)]
-
-        long_qt = long_qt[["Timestamp", "Start_Ind", "Stop_Ind", "Duration", "Type", "Info"]]
-
-        df = self.df_card_nav.append(long_qt)
-        df = df.sort_values("Timestamp")
-
-        return df
 
     def format_qc_data(self):
 
@@ -244,7 +211,7 @@ class ArrhythmiaProcessor:
             # Row index in df_qc that start of event falls into
             epoch_start_ind = int(np.floor(row.Start_Ind / (epoch_len * self.details["sample_rate"])))
 
-            # Row index in df_qc that end of event falls into (includsive)
+            # Row index in df_qc that end of event falls into (inclusive)
             epoch_stop_ind = int(np.ceil(row.Stop_Ind / (epoch_len * self.details["sample_rate"]))) + 1
 
             qc = df_qc.iloc[epoch_start_ind:epoch_stop_ind]  # Cropped QC df
@@ -281,7 +248,14 @@ class ArrhythmiaProcessor:
             bout_name = "bouts" if row.count > 1 else "bout"
             print(f"-{row.Index}: {int(row.count)} {bout_name}, total duration = {round(row.Duration, 1)} seconds")
 
-        return df_valid_arr[["Timestamp", "Type", "Duration"]], desc
+        df_out = df_valid_arr[["Timestamp", "Type", "Duration"]]
+
+        try:
+            df_out["MeanNoise"] = df_valid_arr["MeanNoise"]
+        except KeyError:
+            pass
+
+        return df_out, desc
 
     def remove_nonwear(self, df_events, nw_bouts, show_boxplot=False, pad_nw_window=30,
                        excl_types=("Sinus", "Min. RR", "Afib Max. HR (total)", "Min. HR", "Max. HR", "Afib Min. HR (total)", "Max. RR")):
@@ -390,9 +364,16 @@ class ArrhythmiaProcessor:
                     tick.label.set_rotation(45)
                 axes.set_ylabel("Seconds")
 
-        return df_valid[["Timestamp", "Type", "Duration"]], desc
+        df_out = df_valid[["Timestamp", "Type", "Duration"]]
 
-    def plot_arrhythmias(self, df, downsample=3,
+        try:
+            df_out["MeanNoise"] = df_valid["MeanNoise"]
+        except KeyError:
+            pass
+
+        return df_out, desc
+
+    def plot_arrhythmias(self, df, downsample=3, plot_noise=True,
                          types=("COUP(mf)", "SALV(mf)", "GEM(mf)", "COUP", "AF",  "PAC/SVE", "IVR", "SALV", "Arrest", "Block", "GEM", "AV2/II", "ST+")):
 
         if self.ecg is None or self.timestamps is None:
@@ -429,19 +410,35 @@ class ArrhythmiaProcessor:
         max_val = max(self.ecg)
         min_val = min(self.ecg)
 
-        fig, axes = plt.subplots(1, figsize=(12, 8))
-        axes.plot(self.timestamps[::downsample], self.ecg[::downsample], color='black')
+        if not plot_noise:
+            fig, axes = plt.subplots(1, figsize=(12, 8))
+            axes.plot(self.timestamps[::downsample], self.ecg[::downsample], color='black')
 
-        for row in data.itertuples():
-            # Fill between region
-            axes.fill_between(x=[row.Timestamp, row.Timestamp + td(seconds=row.Duration)],
-                              y1=min_val*1.1, y2=max_val*1.1, color=color_dict[row.Type], alpha=.35)
-            # Triangle markers for visibility
-            axes.scatter(row.Timestamp + td(seconds=row.Duration/2), max_val*1.1, marker="v",
-                         color=color_dict[row.Type])
+            for row in data.itertuples():
+                # Fill between region
+                axes.fill_between(x=[row.Timestamp, row.Timestamp + td(seconds=row.Duration)],
+                                  y1=min_val*1.1, y2=max_val*1.1, color=color_dict[row.Type], alpha=.35)
+                # Triangle markers for visibility
+                axes.scatter(row.Timestamp + td(seconds=row.Duration/2), max_val*1.1, marker="v",
+                             color=color_dict[row.Type])
 
-        plt.title(f"Showing {types} events")
-        axes.xaxis.set_major_formatter(xfmt)
+            plt.title(f"Showing {types} events")
+            axes.xaxis.set_major_formatter(xfmt)
+
+        if plot_noise:
+            fig, axes = plt.subplots(2, sharex='col', figsize=(12, 8))
+            axes[0].plot(self.timestamps[::downsample], self.ecg[::downsample], color='black')
+
+            for row in data.itertuples():
+                # Fill between region
+                axes[0].fill_between(x=[row.Timestamp, row.Timestamp + td(seconds=row.Duration)],
+                                     y1=min_val * 1.1, y2=max_val * 1.1, color=color_dict[row.Type], alpha=.35)
+                # Triangle markers for visibility
+                axes[0].scatter(row.Timestamp + td(seconds=row.Duration / 2), max_val * 1.1, marker="v",
+                                color=color_dict[row.Type])
+
+            axes[1].plot(self.df_card_nav['Timestamp'], self.df_card_nav["MeanNoise"], marker='o', linestyle="", color='red')
+            axes[1].set_ylabel("Noise")
 
 
 def flag_events_as_gait(start_time, file_dur_sec, df_gait, df_arrhyth):
@@ -514,40 +511,332 @@ def flag_events_as_sleep(start_time, file_dur_sec, df_sleep, df_arrhyth):
                                        "Sleep": ["Unknown" for i in range(len(epoch_stamps))]})
 
 
-def generate_random_valid_period(signal, df_qc, start_time, image_n=1, image_of=1,
+def average_event_noise_values(df_beats, df_arrhyth):
+
+    print("\nCalculating mean noise values from Cardiac Navigator for each arrhythmia event...")
+
+    mean_noise = []
+    for row in df_arrhyth.itertuples():
+
+        df_beat = df_beats.loc[(df_beats["Timestamp"] >= row.Timestamp) &
+                               (df_beats["Timestamp"] <= row.Timestamp + td(seconds=row.Duration))]
+        avg = df_beat["NOISE"].mean()
+        mean_noise.append(avg)
+
+    df_arrhyth["MeanNoise"] = mean_noise
+    print("Complete.")
+
+
+def calculate_epoch_noise(df_qc, df_beat, epoch_len=15):
+    print("\nCalculating mean noise values from Cardiac Navigator for each {}-second epoch...")
+
+    mean_noise = []
+    for row in df_qc.itertuples():
+        if row.Index % 250 == 0:
+            print(100 * row.Index / df_qc.shape[0])
+
+        epoch = df_qc[(df_beat["Timestamp"] >= row.Timestamp) &
+                      (df_beat["Timestamp"] <= row.Timestamp + td(seconds=epoch_len))]
+        avg = epoch["NOISE"].mean()
+        mean_noise.append(avg)
+
+    df_qc["MeanNoise"] = mean_noise
+
+    print("Complete.")
+
+
+def generate_random_valid_period(signal, df_qc, start_time, image_n=1, image_of=1, filter_data=True,
                                  window_len=10, sample_f=250, figsize=(10, 6)):
 
     df_orph_valid = df_qc.loc[df_qc["Validity"] == "Valid"]
     rand_index = random.choice([i for i in df_orph_valid["Index"]])
 
     window = signal[rand_index:rand_index + int(sample_f * window_len)]
+
+    if filter_data:
+        window = filter_signal(data=window, sample_f=sample_f, low_f=.33, high_f=40,
+                               filter_type='bandpass', filter_order=3)
+
     ts = pd.date_range(start=start_time + td(seconds=rand_index/sample_f), periods=len(window),
                        freq="{}ms".format(1000/sample_f))
 
     fig, ax = plt.subplots(figsize=figsize)
 
     n_hours = round((ts[0] - start_time).total_seconds() / 3600, 1)
-    ax.plot(np.arange(len(window)) / sample_f, window, color='green')
-    ax.set_title(f"{subj}: Sample Clean Data {image_n}/{image_of}\n{ts[0]} ({n_hours} hours into collection)", color='green')
+    ax.plot(np.arange(len(window)) / sample_f, window, color='black')
+    ax.set_title(f"Sample Clean Data #{image_n}/{image_of}\n{ts[0]} ({n_hours} hours into collection)", color='green')
     ax.set_ylabel("uV")
     ax.set_xlabel("Seconds")
 
     return fig
 
 
-def gen_sample_pdf(signal, df_arrhythmia, start_timestamp, df_qc, beat_data, sample_f=250, save_pdf=True,
+def print_n_events(include_events=('Sinus', 'ST(ref)', 'PAC/SVE', 'AV1', 'COUP(mf)', 'COUP', 'GEM(mf)', 'GEM', 'SALV(mf)', 'SALV', 'Min. RR', 'SVT', 'VT', 'VT(mf)', 'ST-', 'Arrest', 'Block', 'Max. HR', 'Min. HR', 'AV2/II', 'AF', 'Max. RR', 'Afib Max. HR (total)', 'Afib Min. HR (total)')):
+
+    if arr.df_card_nav is not None:
+        raw = arr.df_card_nav.loc[arr.df_card_nav["Type"].isin(include_events)]
+        print(f"\nRaw: {raw.shape[0]} events")
+
+        if arr.df_valid_arr_nw is not None:
+            nw_arr = arr.df_valid_arr_nw.loc[arr.df_valid_arr_nw["Type"].isin(include_events)]
+            print(f"Nonwear: {nw_arr.shape[0]} events ({(round(100*nw_arr.shape[0]/raw.shape[0], 1))}% remain)")
+
+        if arr.df_valid_arr_qc is not None:
+            qc_arr = arr.df_valid_arr_qc.loc[arr.df_valid_arr_qc["Type"].isin(include_events)]
+            print(f"Quality check: {qc_arr.shape[0]} events ({(round(100*qc_arr.shape[0]/raw.shape[0], 1))}% remain)")
+
+        if arr.df_valid is not None:
+            valid_arr = arr.df_valid.loc[arr.df_valid["Type"].isin(include_events)]
+            print(f"QC and NW: {valid_arr.shape[0]} events ({(round(100*valid_arr.shape[0]/raw.shape[0], 1))}% remain)")
+
+        try:
+            r = df_report.loc[df_report["Type"].isin(include_events)]
+            print(f"In report: {r.shape[0]} events ({(round(100*r.shape[0]/raw.shape[0], 1))}% remain)")
+        except (AttributeError, NameError):
+            pass
+
+
+def gen_stripchart(signal, start_stamp, df_beat=None, df_event=None, line_duration_sec=10,  sample_f=250,
+                   plot_width_inch=10.0, title=None):
+
+    # Signal bias removal and conversion to mV
+    e = [i/1000 for i in signal]
+    bias = np.mean(e)
+    e_zeroed = [i-bias for i in e]
+
+    # Plotting set-up ------------------------------------------------------------------------------------------------
+
+    # How many subplots required to show all data, given line_duration value and length of data
+    n_plots = int(np.ceil(len(signal) / (line_duration_sec * sample_f)))
+
+    # Timestamps for each row
+    ts_row = pd.date_range(start=start_stamp, periods=n_plots+1, freq=f'{line_duration_sec}S')
+
+    # Indexes in signal for each row
+    row_inds = [i for i in range(0, int(len(signal)), int(sample_f * line_duration_sec))]
+
+    # Voltage ranges
+    voltage_range = [min(e_zeroed), max(e_zeroed)]
+
+    if abs(voltage_range[1] - voltage_range[0]) < 1.25:
+        voltage_range = [min(e_zeroed), min(e_zeroed) + 1.25]
+
+    # how many 1mm boxes required to contain voltage range +- .25mV
+    # x10 since 1 box = .1mV
+    y_range = (voltage_range[1] + .25 - (voltage_range[0] - .25)) * 10  # n 1mm lines
+
+    # Height of each subplot given plot_width and signal amplitude
+    h = y_range * plot_width_inch / (25 * (line_duration_sec + 1))
+
+    # Figure set-up
+    # Dimensions ensures grids are squares
+    fig, ax = plt.subplots(n_plots, sharex='col', figsize=(plot_width_inch, h * n_plots))
+    plt.subplots_adjust(hspace=0, top=.925, bottom=.075, left=.075, right=.925)
+
+    if title is not None:
+        plt.suptitle(title)
+
+    # Plotting if only a single subplot ------------------------------------------------------------------------------
+    if n_plots == 1:
+
+        df_e = None
+
+        if df_event is not None:
+            df_e = df_event.copy()
+            df_e['EndTimestamp'] = [row.Timestamp + td(seconds=row.Duration) for row in df_e.itertuples()]
+            df_e = df_e.loc[(df_e["Timestamp"] >= start_stamp) & (df_e["EndTimestamp"] <= ts_row[-1])]
+
+        # Loops through subplots
+        for i in range(n_plots):
+            # Crops data: fills each row. Last row likely not full
+            try:
+                d = e_zeroed[row_inds[i]:row_inds[i + 1]]
+            except IndexError:
+                d = e_zeroed[row_inds[i]:-1]
+
+            # ECG data
+            ax.plot([j / sample_f for j in np.arange(len(d))], d, color='black')
+
+            # Adds faint vertical line every 1-sec
+            for sec in range(0, line_duration_sec + 2):
+                ax.axvline(sec, color='red', zorder=0, alpha=.35)
+
+            # Y and X axis grid
+            ax.set_xticks(np.arange(0, line_duration_sec + 1 + .01, .2))
+            ax.set_xticks(np.arange(0, line_duration_sec + 1 + .01, .04), minor=True)
+
+            ax.set_yticks(np.arange(voltage_range[0] - .25, voltage_range[1] + .5, .5))
+            ytick_vals = ax.get_yticks()
+            ax.set_yticks(np.arange(voltage_range[0] - .25, voltage_range[1] + .25, .1), minor=True)
+
+            ax.grid(color='red', which='minor', linewidth=.35, alpha=.35)
+            ax.grid(color='red', which='major', linewidth=.65, alpha=.65)
+            ax.set_xlim(0, line_duration_sec + .825)
+
+            ax.set_ylim(voltage_range[0] - .25, voltage_range[1] + .25)
+            ax.tick_params(axis='y', colors='white')
+            ax.tick_params(axis='x', colors='white')
+
+            # Calibration square wave for first subplot: aligns with major grid lines
+            if i == 0:
+                # .4-second long wave
+                sw = np.array([ytick_vals[1] for i in range(int(sample_f * .4))])
+
+                # Sets middle .2-second segment to 1mV height
+                sw[int(len(sw) / 2 - int(sample_f / 10)):int(len(sw) / 2 + int(sample_f / 10))] = ytick_vals[3]
+
+                ax.plot([(j + len(d)) / sample_f + .12 for j in range(len(sw))], sw,
+                        linewidth=.75, color='black', label='1mV\n0.2 sec')
+
+                ax.text(x=line_duration_sec + .06, y=ytick_vals[0] + (ytick_vals[1] - ytick_vals[0]) / 4,
+                        s="0.2s, 1mV", fontsize=8)
+
+            # Figure out shading by row
+            row_start = ts_row[i]
+            row_stop = ts_row[i + 1]
+
+            # Flags beats -------------------------------
+            if df_beat is not None:
+                df_beat_crop = df_beat.loc[(df_beat["Timestamp"] >= row_start) &
+                                           (df_beat["Timestamp"] <= row_stop)]
+
+                for row in df_beat_crop.itertuples():
+                    ax.scatter(x=(row.Timestamp - row_start).total_seconds(), y=voltage_range[1] + .08,
+                               marker='v', color='limegreen', s=25)
+
+            # Shades arrhythmia event ------------------
+            if df_event is not None:
+                for row in df_e.itertuples():
+                    if row.Timestamp >= row_start:
+                        # Fills event start to end
+                        if row.EndTimestamp <= row_stop:
+                            ax.fill_between(x=[(row.Timestamp - row_start).total_seconds(),
+                                               (row.EndTimestamp - row_start).total_seconds()],
+                                            y1=voltage_range[0] - .25, y2=voltage_range[1] + .25,
+                                            color='grey', alpha=.35)
+                        # Fills event start to end of row if proceeds onto next row
+                        if row.EndTimestamp > row_stop:
+                            ax.fill_between(x=[(row.Timestamp - row_start).total_seconds(), len(d) / sample_f],
+                                            y1=voltage_range[0] - .25, y2=voltage_range[1] + .25,
+                                            color='grey', alpha=.35)
+
+    # Plotting if multiple subplots ----------------------------------------------------------------------------------
+    if n_plots >= 2:
+        df_e = None
+
+        if df_event is not None:
+            df_e = df_event.copy()
+            df_e['EndTimestamp'] = [row.Timestamp + td(seconds=row.Duration) for row in df_e.itertuples()]
+            df_e = df_e.loc[(df_e["Timestamp"] >= start_stamp) & (df_e["EndTimestamp"] <= ts_row[-1])]
+
+        # Loops through subplots
+        for i in range(n_plots):
+            # Crops data: fills each row. Last row likely not full
+            try:
+                d = e_zeroed[row_inds[i]:row_inds[i+1]]
+            except IndexError:
+                d = e_zeroed[row_inds[i]:-1]
+
+            # ECG data
+            ax[i].plot([j / sample_f for j in np.arange(len(d))], d, color='black')
+
+            # Adds faint vertical line every 1-sec
+            for sec in range(0, line_duration_sec + 2):
+                ax[i].axvline(sec, color='red', zorder=0, alpha=.35)
+
+            # Y and X axis grid
+            ax[i].set_xticks(np.arange(0, line_duration_sec + 1 + .01, .2))
+            ax[i].set_xticks(np.arange(0, line_duration_sec + 1 + .01, .04), minor=True)
+
+            ax[i].set_yticks(np.arange(voltage_range[0] - .25, voltage_range[1] + .5, .5))
+            ytick_vals = ax[i].get_yticks()
+            ax[i].set_yticks(np.arange(voltage_range[0] - .25, voltage_range[1] + .25, .1), minor=True)
+
+            ax[i].grid(color='red', which='minor', linewidth=.35, alpha=.35)
+            ax[i].grid(color='red', which='major', linewidth=.65, alpha=.65)
+            ax[i].set_xlim(0, line_duration_sec + .625)
+
+            ax[i].set_ylim(voltage_range[0] - .25, voltage_range[1] + .25)
+            ax[i].tick_params(axis='y', colors='white')
+            ax[i].tick_params(axis='x', colors='white')
+
+            # Calibration square wave for first subplot: aligns with major grid lines
+            if i == 0:
+                # .4-second long wave
+                sw = np.array([ytick_vals[1] for i in range(int(sample_f * .4))])
+
+                # Sets middle .2-second segment to 1mV height
+                sw[int(len(sw) / 2 - int(sample_f / 10)):int(len(sw) / 2 + int(sample_f / 10))] = ytick_vals[3]
+
+                ax[0].plot([(j + len(d))/sample_f + .12 for j in range(len(sw))], sw,
+                           linewidth=.75, color='black', label='1mV\n0.2 sec')
+
+                ax[0].text(x=line_duration_sec + .06, y=ytick_vals[0] + (ytick_vals[1] - ytick_vals[0])/4,
+                           s="0.2s, 1mV", fontsize=8)
+
+            # Figure out shading by row
+            row_start = ts_row[i]
+            row_stop = ts_row[i+1]
+
+            # Flags beats -------------------------------
+            if df_beat is not None:
+                df_beat_crop = df_beat.loc[(df_beat["Timestamp"] >= row_start) &
+                                           (df_beat["Timestamp"] <= row_stop)]
+
+                for row in df_beat_crop.itertuples():
+                    ax[i].scatter(x=(row.Timestamp - row_start).total_seconds(), y=voltage_range[1] + .08,
+                                  marker='v', color='limegreen', s=25)
+
+            # Shades arrhythmia event ------------------
+            if df_event is not None:
+                for row in df_e.itertuples():
+                    if row.Timestamp >= row_start:
+                        # Fills event start to end
+                        if row.EndTimestamp <= row_stop:
+                            ax[i].fill_between(x=[(row.Timestamp - row_start).total_seconds(),
+                                                  (row.EndTimestamp - row_start).total_seconds()],
+                                               y1=voltage_range[0] - .25, y2=voltage_range[1] + .25,
+                                               color='grey', alpha=.35)
+                        # Fills event start to end of row if proceeds onto next row
+                        if row.EndTimestamp > row_stop:
+                            ax[i].fill_between(x=[(row.Timestamp - row_start).total_seconds(), len(d) / sample_f],
+                                               y1=voltage_range[0] - .25, y2=voltage_range[1] + .25,
+                                               color='grey', alpha=.35)
+
+    return fig
+
+
+def gen_sample_pdf2(signal, df_arrhythmia, df_arrhythmia_all, start_timestamp, beat_data,
+                    df_qc=None, bad_data_removed=True, sample_f=250, save_pdf=True, img_dpi=150,
                    arrhythmias=("VT", "Arrest", "AF", "Brady", "Tachy", "Block", "ST+", "AV2/II"),
-                   img_folder="C:/Users/ksweber/Desktop/TemporaryImages/", show_n_seconds=15,
+                   img_folder="C:/Users/ksweber/Desktop/TemporaryImages/",
+                    show_n_seconds=30, seconds_per_line=10, min_pad_len=10,
                    include_sample_data=3, orientation='vertical', collect_dur_hours=0,
                    save_dir="C:/Users/ksweber/Desktop/", logo_link="C:/Users/ksweber/Pictures/HANDDS-logo.jpg",
-                   pad_short_events=True, include_all_events=False):
+                   include_all_events=True):
 
-    # only includes desired arrhythmias
-    all_detected = arr.df_valid['Type'].unique()  # all types in original file
+    names_dict = {"Sinus": "Sinus", "PAC/SVE": "Premature atrial contraction/supraventricular ectopic beat",
+                  "AV1": "1º AV block",
+                  "COUP(mf)": "Multifocal couplet", "COUP": "Couplet",
+                  "GEM(mf)": "Multifocal geminy", "GEM": "Geminy",
+                  "SALV": "Salvos", "SALV(mf)": "Multifocal Salvos",
+                  "SVT": "Supraventricular tachycardiac", "VT": "Ventricular tachycardia", "Tachy": "Tachycardia",
+                  "VT(mf)": "Multifocal ventricular tachycardia", "Brady": "Bradycardia",
+                  "ST-": "ST depression", "ST+": "ST elevation",
+                  "Arrest": "Arrest", "Block": "Block", "AV2II": "2º AV block/Mobitz II", "AF": "Atrial fibrillation",
+                  "IVR": "Idioventricular rhythm"}
+    img_list = []
+    titles = []
+    ts = pd.date_range(start=start_timestamp, periods=len(signal), freq="{}ms".format(1000 / sample_f))
+
+    # only includes desired arrhythmias ---------------------------------------
+    all_detected = df_arrhythmia_all['Type'].unique()  # all types in original file
     df_arrhythmia = df_arrhythmia.loc[df_arrhythmia["Type"].isin(arrhythmias)]  # only desired arrhythmias
-    print("\nGenerating report of the following arrhtyhmias:")
+
+    print("\nGenerating report of the following arrhythmias:")
     print(arrhythmias)
 
+    # arrhythmias to exclude --------------------------------
     excl = [i for i in all_detected if i not in arrhythmias]
 
     # list of detected arrhythmias
@@ -561,166 +850,208 @@ def gen_sample_pdf(signal, df_arrhythmia, start_timestamp, df_qc, beat_data, sam
     except ValueError:
         df_desc = None
 
-    img_list = []
+    # generating data for all arrhythmia events --------------------------------
+    print("\nGenerating data for all events...")
+    for t in found_arrs:
+        n_events = int(df_desc.loc[t]["count"])  # number of events for each condition
+        print(f"-{t} ({n_events} events)")
 
-    # Loops each arrhythmia and generates a plot of a random event
-    if not include_all_events:
-        print("\nRandomly selecting one event from each arrhythmia type...")
+        row_i = 0
 
-    if include_all_events:
-        print("\nGenerating data for all events...")
+        df_current_arr = df_arrhythmia.loc[df_arrhythmia["Type"] == t]
 
-    if len(found_arrs) > 0:
-        for t in found_arrs:
-            print(f"-{t}")
-            n_events = int(df_desc.loc[t]["count"])
-            df_inds = [i for i in df_arrhythmia.loc[df_arrhythmia["Type"] == t].index]
+        for row in df_current_arr.itertuples():
 
-            if not include_all_events:
-                # randomly picks one event if more than one event detected
-                if n_events > 1:
-                    ind = random.choice(range(len(df_inds)-1))
-                    row = df_inds[ind]
+            # creates string to explain gait/sleep context --------
+            context_str = ["During"]
+            if row.Gait:
+                context_str.append("gait")
+                if row.Sleep:
+                    context_str.append("and sleep")
+            if not row.Gait:
+                if row.Sleep:
+                    context_str.append("sleep")
+            if not row.Gait and not row.Sleep:
+                context_str = ["Awake, no ambulation"]
 
-                if n_events == 1:
-                    ind = 0
-                    row = df_inds[0]
+            context_join = " ".join(context_str)
+            ts_formatted = str(row.Timestamp.round("1S").strftime("%A, %B %m, %Y at %H:%M:%S"))
+            title = "{}: event #{}/{}; {} ({} seconds); {}".format(names_dict[t], str(int(row_i + 1)), n_events,
+                                                                   ts_formatted,
+                                                                   round(row.Duration, 1),
+                                                                   context_join)
 
-            if include_all_events:
-                row = df_inds
+            # Data cropping
+            pad = (show_n_seconds - row.Duration) / 2
+            if pad < min_pad_len:
+                pad = min_pad_len
 
-            d = df_arrhythmia.loc[row]
+            window_start = row.Timestamp + td(seconds=-pad)
+            window_end = row.Timestamp + td(seconds=row.Duration + pad)
+            start_ind = int((window_start - start_timestamp).total_seconds() * sample_f)
+            stop_ind = int((window_end - start_timestamp).total_seconds() * sample_f)
 
-            row_i = 0
-            for row in d.itertuples():
+            data = signal[start_ind:stop_ind]
 
-                # Cropping data
-                if row.Duration < show_n_seconds:
-                    if pad_short_events:
-                        pad = show_n_seconds - row.Duration
-                    if not pad_short_events:
-                        pad = 2
+            df_beat = beat_data.loc[(beat_data["Timestamp"] >= ts[start_ind]) &
+                                    (beat_data["Timestamp"] <= ts[stop_ind])]
 
-                    start_ind = int((row.Timestamp - start_timestamp).total_seconds() * sample_f - pad/2 * sample_f)
-                    stop_ind = int((row.Timestamp + td(seconds=row.Duration) - start_timestamp).total_seconds() *
-                                   sample_f + pad/2 * sample_f)
+            plt.close("all")
 
-                if row.Duration >= show_n_seconds:
-                    midpoint_ind = int((row.Timestamp + td(seconds=row.Duration/2) - start_timestamp).total_seconds() * sample_f)
-                    start_ind = int((midpoint_ind - show_n_seconds / 2 * sample_f))
-                    stop_ind = int(midpoint_ind + show_n_seconds / 2 * sample_f)
+            fig = gen_stripchart(signal=data, start_stamp=ts[start_ind],
+                                 df_beat=df_beat, df_event=df_arrhythmia,
+                                 sample_f=sample_f, line_duration_sec=seconds_per_line,
+                                 plot_width_inch=15, title=None)
 
-                data = signal[start_ind:stop_ind]
+            title = title + f"; Plot width = {seconds_per_line} seconds"
+            titles.append(title)
 
-                df_beat = beat_data.loc[(beat_data["Timestamp"] >= ts[start_ind]) &
-                                        (beat_data["Timestamp"] <= ts[stop_ind])]
-                max_volt = max(data) * 1.1
-
-                plt.close("all")
-                fig, ax = plt.subplots(1, figsize=(7.5, 5.5))
-                plt.subplots_adjust(top=0.875, bottom=0.125, left=0.075, right=0.975, hspace=0.2, wspace=0.2)
-
-                ax.plot(ts[start_ind:stop_ind], data, color='black')
-                ax.scatter(df_beat["Timestamp"], [max_volt for i in range(df_beat.shape[0])],
-                           color='green', s=15, marker='v', label='Detected beats')
-                ax.fill_between(x=[row.Timestamp, row.Timestamp + td(seconds=row.Duration)], y1=min(data), y2=max(data),
-                                color='grey', alpha=.35)
-                ax.legend(loc='lower left')
-                show_lab = "full event" if row.Duration < show_n_seconds else "cropped"
-                ax.set_title("{} Event {}/{}: start = {}, {} seconds ({})\n"
-                             "Context: gait = {}, sleep = {}".format(t, str(int(row_i+1)), n_events,
-                                                                     str(row.Timestamp.round("1S")),
-                                                                     round(row.Duration, 1), show_lab,
-                                                                     row.Gait, row.Sleep))
-                ax.xaxis.set_major_formatter(xfmt)
-                plt.xticks(rotation=45, fontsize=8)
-
-                if row.Duration >= show_n_seconds:
-                    ax.set_xlim(ts[start_ind], ts[stop_ind])
-
-                if save_pdf:
-                    # Saves png file
-                    t_name = t if t != "PAC/SVE" else "PACSVE"
-                    plt.savefig(f"{img_folder}{t_name}_Index{row.Index}.png", dpi=100)
-                    img_list.append(f"{img_folder}{t_name}_Index{row.Index}.png")
+            if save_pdf:
+                # Saves png file
+                t_name = t if t != "PAC/SVE" else "PACSVE"
+                plt.savefig(f"{img_folder}{t_name}_Index{row.Index}.png", dpi=img_dpi)
+                img_list.append(f"{img_folder}{t_name}_Index{row.Index}.png")
 
                 row_i += 1
 
+    titles_dict = {}
+    for n, t in zip(img_list, titles):
+        titles_dict[n] = t
+
     plt.close("all")
 
+    """ ============================================= PDF GENERATION ========================================= """
     if save_pdf:
         print(f"\nCombining {include_sample_data + df_arrhythmia.shape[0]} images into PDF...")
         # Creates pdf from all png files
-        pdf = FPDF(orientation="L")  # "L" for landscape
+
+        pdf = FPDF("L", 'mm', 'Letter')
+        pdf.set_auto_page_break(auto=True)
         pdf.add_page()
-        pdf.set_font("Arial", size=20)
 
+        # TITLE PAGE -----------------------------------------------------------------------------------------------
         if os.path.exists(logo_link):
-            pdf.image(name=logo_link, x=100, y=115, w=90, h=90)
-        pdf.set_font("Arial", size=12)
+            pdf.image(name=logo_link, x=200, y=140, w=75, h=75)
 
-        p_valid = round(100 * df_qc["Validity"].value_counts().loc["Valid"] / df_qc.shape[0], 1)
+        if df_qc is not None and bad_data_removed:
+            p_valid = round(100 * df_qc["Validity"].value_counts().loc["Valid"] / df_qc.shape[0], 1)
+        if df_qc is None or not bad_data_removed:
+            p_valid = 100
 
-        pdf.cell(200, 10, txt=f"Subject {subj}", ln=1, align="L")
-        pdf.cell(200, 10, txt=" ", ln=2, align="L")
+        pdf.set_font("Arial", 'B', 12)
 
-        pdf.cell(200, 10, txt="Collection details", ln=3, align="L")
-        pdf.cell(200, 10, txt=f"-Device orientation: {orientation}", ln=4, align="L")
-        pdf.cell(200, 10, txt=f"-Collection duration: {round(collect_dur_hours, 1)} hours", ln=5, align="L")
-        pdf.cell(200, 10, txt=f"-Usable data: {p_valid}% valid (Orphanidou algorithm); "
-                              f"{round(p_valid/100*collect_dur_hours, 1)} hours of data", ln=6, align="L")
+        # w=0 makes cell the width of the page
+        pdf.cell(w=0, h=8, txt=f"Subject {subj}", ln=True, align="L")
+        pdf.cell(w=0, h=8, txt="", ln=True, align="L")
 
-        pdf.cell(200, 10, txt=" ", ln=7, align="L")
+        pdf.set_font("Arial", 'U', 12)
+        pdf.cell(w=0, h=8, txt="Collection details", ln=True, align="L")
 
-        pdf.cell(200, 10, txt="Arrhythmia analysis", ln=8, align="L")
-        pdf.cell(200, 10, txt=f"-Arrhythmias to include: {arrhythmias}", ln=9, align="L")
-        pdf.cell(200, 10, txt=f"-Excluding detected arrhythmias: {excl}", ln=10, align="L")
-        pdf.cell(200, 10, txt=f"-Found {df_arrhythmia.shape[0]} events", ln=11, align="L")
+        pdf.set_font("Arial", '', 12)
+        pdf.cell(w=0, h=8, txt=f"-Device orientation: {orientation}", ln=True, align="L")
 
-        if include_sample_data > 0:
+        coll_days = int(np.floor(collect_dur_hours / 24))
+        coll_hours = int(np.floor(collect_dur_hours - 24 * coll_days))
+        coll_mins = int(collect_dur_hours * 60 - 24*60 * coll_days - 60 * coll_hours)
+        coll_dur_str = "{} day{}, {} hour{}, {} minute{}".format(coll_days, "s" if coll_days != 1 else "",
+                                                                 coll_hours, "s" if coll_hours != 1 else "",
+                                                                 coll_mins, "s" if coll_mins != 1 else "")
+        pdf.cell(w=0, h=8, txt=f"-Collection duration: {coll_dur_str}", ln=True, align="L")
+
+        usable_dur = round(p_valid/100*collect_dur_hours, 1)
+        coll_days = int(np.floor(usable_dur / 24))
+        coll_hours = int(np.floor(usable_dur - 24 * coll_days))
+        coll_mins = int(usable_dur * 60 - 24*60 * coll_days - 60 * coll_hours)
+        coll_dur_str = "{} day{}, {} hour{}, {} minute{}".format(coll_days, "s" if coll_days != 1 else "",
+                                                                 coll_hours, "s" if coll_hours != 1 else "",
+                                                                 coll_mins, "s" if coll_mins != 1 else "")
+        pdf.cell(w=0, h=8, txt=f"     -Used in analysis: {coll_dur_str}", ln=True, align="L")
+
+        pdf.cell(w=0, h=8, txt=" ", ln=True, align="L")
+
+        pdf.set_font("Arial", 'U', 12)
+        pdf.cell(w=0, h=8, txt="Arrhythmia analysis", ln=True, align="L")
+
+        pdf.set_font("Arial", '', 12)
+        pdf.cell(w=0, h=8, txt=f"-Clinically significant arrhythmias:", ln=True, align="L")
+
+        try:
+            for row in df_desc.itertuples():
+                event_label = "event" if row.count == 1 else "events"
+                pdf.cell(w=0, h=8, txt=f"     -{names_dict[row.Index]}: {int(row.count)} {event_label}, "
+                                       f"total duration = {round(row.mean*row.count, 1)} seconds",
+                         ln=True, align="L")
+        except AttributeError:
+            pdf.cell(w=0, h=8, ln=True, align="L", txt="     -No clinically significant events found.")
+
+        pdf.set_font("Arial", '', 12)
+
+        if include_sample_data > 0 and df_qc is None:
+            print("\nCannot generate random, clean data - no quality check dataframe given.")
+
+        if include_sample_data > 0 and df_qc is not None:
             for i in range(1, include_sample_data+1):
                 plt.close("all")
-                fig = generate_random_valid_period(signal, window_len=10, sample_f=fs, figsize=(7.5, 5.5), df_qc=df_qc,
-                                                   image_n=i, image_of=include_sample_data, start_time=start_stamp)
-                fig.savefig(f"{img_folder}SampleData{i}.png", dpi=100)
+
+                df_orph_valid = df_qc.loc[df_qc["Validity"] == "Valid"]
+                rand_index = random.choice([i for i in df_orph_valid["Index"]])
+
+                window = signal[rand_index:rand_index + int(sample_f * 40)]
+
+                df_beat = beat_data.loc[(beat_data["Timestamp"] >= ts[rand_index]) &
+                                        (beat_data["Timestamp"] <= ts[rand_index + int(sample_f * 40)])]
+
+                fig = gen_stripchart(signal=window, start_stamp=ts[rand_index],
+                                     df_beat=df_beat, df_event=None,
+                                     sample_f=sample_f, line_duration_sec=seconds_per_line,
+                                     plot_width_inch=15, title=None)
+
+                fig.savefig(f"{img_folder}SampleData{i}.png", dpi=img_dpi)
                 img_list.insert(i-1, f"{img_folder}SampleData{i}.png")
+
+                hours_into = round((ts[rand_index] - start_timestamp).total_seconds()/3600, 1)
+                titles_dict[f"{img_folder}SampleData{i}.png"] = f"SampleData{i}: {hours_into} hours into collection; " \
+                                                                f"Plot width = {show_n_seconds} seconds"
+
             plt.close("all")
 
-        for img in img_list:
-            pdf.image(img)
+        # DATA PAGES -------------------------------------------------------------------------------------------------
+        pdf.set_font("Arial", '', 14)
+
+        sample_n = 1
+        for i, img in enumerate(img_list):
+            pdf.add_page(orientation="L")
+
+            if "SampleData" not in img:
+                try:
+                    pdf.cell(w=0, h=10, txt=titles_dict[img].split(";")[0], ln=True, align="C")
+                    pdf.cell(w=0, h=10, txt=titles_dict[img].split(";")[1], ln=True, align="C")
+                    pdf.cell(w=0, h=10, txt=titles_dict[img].split(";")[2], ln=True, align="C")
+                    pdf.cell(w=0, h=10, txt=titles_dict[img].split(";")[3], ln=True, align="C")
+
+                except KeyError:
+                    pass
+                pdf.image(img, x=-20, y=50, w=315)
+            if "SampleData" in img:
+                pdf.cell(w=0, h=10, txt=f"Sample Clean Data #{sample_n}: " +
+                                        titles_dict[img].split(";")[0].split(":")[1], ln=True, align="C")
+                pdf.cell(w=0, h=10, txt=titles_dict[img].split(";")[1], ln=True, align="C")
+                pdf.image(img, x=-20, y=50, w=315)
+                sample_n += 1
+
             os.remove(img)
+
         pdf.output("{}{}_{}.pdf".format(save_dir, subj, "Random" if not include_all_events else "Complete"))
         print(f"PDF created (saved to {save_dir}).")
 
     return df_arrhythmia
 
 
-def print_n_events():
-
-    if arr.df_card_nav is not None:
-        raw = arr.df_card_nav.loc[arr.df_card_nav["Type"] != "Sinus"]
-        print(f"\nRaw: {raw.shape[0]} events")
-
-        if arr.df_valid_arr_nw is not None:
-            nw_arr = arr.df_valid_arr_nw.loc[arr.df_valid_arr_nw["Type"] != "Sinus"]
-            print(f"Nonwear: {nw_arr.shape[0]} events ({(round(100*nw_arr.shape[0]/raw.shape[0], 1))}% remain)")
-
-        if arr.df_valid_arr_qc is not None:
-            qc_arr = arr.df_valid_arr_qc.loc[arr.df_valid_arr_qc["Type"] != "Sinus"]
-            print(f"Quality check: {qc_arr.shape[0]} events ({(round(100*qc_arr.shape[0]/raw.shape[0], 1))}% remain)")
-
-        if arr.df_valid is not None:
-            valid_arr = arr.df_valid.loc[arr.df_valid["Type"] != "Sinus"]
-            print(f"QC and NW: {valid_arr.shape[0]} events ({(round(100*valid_arr.shape[0]/raw.shape[0], 1))}% remain)")
-
-        if df_report is not None:
-            print(f"In report: {df_report.shape[0]} events ({(round(100*df_report.shape[0]/raw.shape[0], 1))}% remain)")
-
-
 """ ================================================= RUNNING SCRIPT ============================================== """
 
-subj = "OND09_0001"
 
+subj = "OND09_0001"
+"""
 ecg, f, start_stamp, ts, fs, df_nw, df_gait, df_sleep_alg, file_dur = load_data(filepath_fmt=f"W:/NiMBaLWEAR/OND09/wearables/device_edf_cropped/{subj}_01_BF36_Chest.edf",
                                                                                 nonwear_file="C:/Users/ksweber/Desktop/OmegaSnap_Nonwear.xlsx",
                                                                                 gait_file=f"W:/NiMBaLWEAR/OND09/analytics/gait/bouts/{subj}_01_GAIT_BOUTS.csv",
@@ -736,21 +1067,34 @@ arr = ArrhythmiaProcessor(
                           details={"start_time": start_stamp, "sample_rate": fs,
                                    "file_dur_sec": file_dur, "epoch_length": 15})
 
-flag_events_as_gait(start_time=start_stamp, file_dur_sec=file_dur, df_gait=df_gait, df_arrhyth=arr.df_valid)
-flag_events_as_sleep(start_time=start_stamp, file_dur_sec=file_dur, df_sleep=df_sleep_alg, df_arrhyth=arr.df_valid)
+# average_event_noise_values(df_beats=arr.df_rr, df_arrhyth=arr.df_card_nav)
 
-handds_arrs = ["VT", "Arrest", "AF", "Brady", "Tachy", "Block", "ST+", "AV2/II"]
+arr.df_valid_arr_qc, arr.df_desc_qc = arr.remove_bad_quality(df_events=arr.df_card_nav, df_qc=arr.df_qc_epochs, show_boxplot=False)
+arr.df_valid_arr_nw, arr.df_desc_nw = arr.remove_nonwear(df_events=arr.df_card_nav, nw_bouts=arr.df_nonwear, show_boxplot=False)
+arr.df_valid, arr.df_desc = arr.combine_valid_dfs(show_boxplot=False)
+
+flag_events_as_gait(start_time=start_stamp, file_dur_sec=file_dur, df_gait=df_gait, df_arrhyth=arr.df_valid_arr_nw)
+flag_events_as_sleep(start_time=start_stamp, file_dur_sec=file_dur, df_sleep=df_sleep_alg, df_arrhyth=arr.df_valid_arr_nw)
+# calculate_epoch_noise(df_qc=arr.df_qc_epochs, df_beat=arr.df_rr, epoch_len=15)
+
+handds_arrs = ["VT", "Arrest", "AF", "Brady", "Tachy", "Block", "AV2II"]
 other_arrs = ("COUP", "COUP(mf)", "PAC/SVE", "GEM", "VT", "Arrest", "AF", "Brady", "Tachy", "Block", "ST+")
-# arr.plot_arrhythmias(df=arr.df_valid_arr_nw, downsample=5, types=other_arrs)
+# arr.plot_arrhythmias(arr, df=arr.df_valid_arr_nw, downsample=3, types=other_arrs, plot_noise=True)
 # arr.df_valid.to_csv(f"C:/Users/ksweber/Desktop/{subj}_ValidArrhythmias_CustomNotFinal_CardiacNavigator15.csv", index=False)
+d = arr.df_valid_arr_nw.loc[arr.df_valid_arr_nw["Type"].isin(handds_arrs)]
+print(d.value_counts("Type"))"""
 
-df_report = gen_sample_pdf(df_arrhythmia=arr.df_valid, signal=ecg, beat_data=arr.df_rr,
-                           sample_f=fs, start_timestamp=start_stamp,
-                           show_n_seconds=10, pad_short_events=False, include_all_events=True, save_pdf=True,
-                           arrhythmias=other_arrs, include_sample_data=3, df_qc=arr.df_qc_epochs,
+
+df_report = gen_sample_pdf2(df_arrhythmia=arr.df_valid_arr_nw, df_arrhythmia_all=arr.df_card_nav,
+                            signal=f, beat_data=arr.df_rr,
+                            sample_f=fs, start_timestamp=start_stamp,
+                            show_n_seconds=30, seconds_per_line=10, min_pad_len=10,
+                            include_all_events=True, save_pdf=True, img_dpi=125,
+                            arrhythmias=handds_arrs, include_sample_data=2,
+                            df_qc=arr.df_qc_epochs, bad_data_removed=False,
                            orientation='vertical', collect_dur_hours=file_dur/3600)
 
-# print_n_events()
+# print_n_events(handds_arrs)
 
 """
 raw = arr.df_card_nav.loc[arr.df_card_nav["Type"].isin(handds_arrs)]
@@ -768,7 +1112,6 @@ print(f"Bad quality removed: {valid_qc.shape[0]} events remain")
 # TODO
 # Put script in nwutils.Scripts
     # Uninstall nwutils package -> ensure importing from 'local' version/folder
-# Work on long QT stuff --> don't include every damn beat
 # Rerun Orphanidou for 0008 (lower voltage threshold)
 # Check how many raw arrhythmias in arrhythmia list --> manageable
 
@@ -813,7 +1156,8 @@ def plot_segment(start_ind=None, win_len_sec=15, sample_f=250, show_noise=False,
         ax2.set_ylabel("Noise", color='dodgerblue')
 
     ax.legend(loc='upper left')
-    ax.set_title("Grey line = Msec timestamp; black line = 'adjusted' timestamp;\nPQ = fuchsia; QR(up) = orange; QRS = green; QT = blue")
+    ax.set_title("Grey line = Msec timestamp; black line = 'adjusted' timestamp;\n"
+                 "PQ = fuchsia; QR(up) = orange; QRS = green; QT = blue")
 
     true_qrs_stamp = []
     for row in rr.itertuples():
@@ -866,46 +1210,64 @@ def plot_segment(start_ind=None, win_len_sec=15, sample_f=250, show_noise=False,
 
 # rr, index, fig = plot_segment(start_ind=None, win_len_sec=5, sample_f=fs, show_noise=False, plot_pq=False, plot_qt=False, plot_adj_qrs=False, plot_raw_qrs=True)
 
+# fig, tld = gen_stripchart(signal=window, start_stamp=ts[rand_index], sample_f=250, line_duration_sec=8, plot_width_inch=17.5)
 
-def find_long_qt_periods(min_beats=10, min_duration=30):
-    inds = [i for i in long_qt.index]
-    diffs = [j-i for i, j in zip(inds[:], inds[1:])]
-    diffs.append(0)
 
-    long_qt["RowDiff"] = diffs
+def crop_long_periods():
+    pass
 
-    indexes = []
-    cur_index = 0
-    for i in range(len(diffs)):
-        if i > cur_index:
-            if [i for i in set(diffs[i:i+min_beats])] == [1]:
-                start = i
 
-                for j in range(i+1, len(diffs)):
-                    if diffs[j] == 1:
-                        pass
+# TODO
+# Figure out how to show overlaps on long plots
+"""window_len = 30
+min_pad = 10
 
-                    if diffs[j] > 1:
-                        end = j
-                        cur_index = j
-                        indexes.append([start, end])
-                        break
+test_event = arr.df_valid_arr_nw.loc[arr.df_valid_arr_nw["Duration"] > 60].sort_values("Duration")
+test_row = test_event.iloc[0]
 
-    longqt_final = pd.DataFrame(columns=long_qt.columns)
-    for i, period in enumerate(indexes):
-        print(period)
-        start = long_qt.iloc[period[0]]
-        stop = long_qt.iloc[period[1]]
+fig, ax = plt.subplots(3, sharex='col')
+if window_len <= test_row["Duration"] <= window_len * 4:
 
-        df_out = pd.DataFrame({"Timestamp": [start["Timestamp"]],
-                               "Start_Ind": [stop['Start_Ind']],
-                               "Stop_Ind": [stop['Stop_Ind']],
-                               "Duration": [(stop['Stop_Ind'] - start['Start_Ind'])/fs],
-                               "Type": ["LongQT"],
-                               "Info": ["AUTOMATIC"]})
-        longqt_final = longqt_final.append(df_out)
+    # Start segment
+    start_ind = (test_row["Start_Ind"] - int(window_len/2 * fs))
+    end_ind = (test_row["Start_Ind"] + int(window_len/2 * fs))
+    # ax[0].plot(ts[start_ind:end_ind], f[start_ind: end_ind])
+    gen_stripchart(signal=f[start_ind:end_ind], start_stamp=ts[start_ind], df_beat=None,
+                   df_event=test_event, line_duration_sec=10, sample_f=250,
+                   plot_width_inch=10.0, title=None)
 
-    longqt_final = longqt_final.loc[longqt_final["Duration"] >= min_duration]
+    # Middle segment
+    middle_ind = (test_row["Stop_Ind"] - test_row["Start_Ind"]) / 2
+    middle_start_ind = int(middle_ind + test_row["Start_Ind"] - int(window_len/2*fs))
+    middle_end_ind = int(middle_ind + test_row["Start_Ind"] + int(window_len/2*fs))
+    # ax[1].plot(ts[middle_start_ind:middle_end_ind], f[middle_start_ind: middle_end_ind])
+    gen_stripchart(signal=f[middle_start_ind:middle_end_ind], start_stamp=ts[middle_start_ind], df_beat=None,
+                   df_event=test_event, line_duration_sec=10, sample_f=250,
+                   plot_width_inch=10.0, title=None)
 
-    return longqt_final
+    # End segment
+    end_start_ind = test_row["Stop_Ind"] - int(window_len/2*fs)
+    end_end_ind = test_row["Stop_Ind"] + int(window_len/2*fs)
+    # ax[2].plot(ts[end_start_ind:end_end_ind], f[end_start_ind: end_end_ind])
 
+    gen_stripchart(signal=f[end_start_ind:end_end_ind], start_stamp=ts[end_start_ind], df_beat=None,
+                   df_event=test_event, line_duration_sec=10, sample_f=250,
+                   plot_width_inch=10.0, title=None)
+
+    # Flags other sections on first section
+    if middle_start_ind < end_ind:
+        ax[0].axvline(ts[middle_start_ind], color='dodgerblue')
+    if end_start_ind < end_ind:
+        ax[0].axvline(ts[end_start_ind], color='red')
+
+    # Flags other sections on middle data
+    if end_ind > middle_start_ind:
+        ax[1].axvline(ts[end_ind], color='orange')
+    if end_start_ind < middle_end_ind:
+        ax[1].axvline(ts[end_start_ind], color='red')
+
+    if end_ind > end_start_ind:
+        ax[2].avhline(ts[end_ind], color='dodgerblue')
+    if middle_end_ind > end_start_ind:
+        ax[2].axvline(ts[middle_end_ind], color='orange')
+"""
