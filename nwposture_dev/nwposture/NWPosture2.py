@@ -10,7 +10,7 @@ import numpy as np
 from scipy import signal
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-xfmt = mdates.DateFormatter("%H:%M:%S")
+xfmt = mdates.DateFormatter("%Y-%m-%d\n%H:%M:%S")
 from tqdm.auto import tqdm
 import pywt
 from scipy.signal import butter, lfilter, filtfilt, iirnotch
@@ -21,7 +21,8 @@ from datetime import timedelta as td
 
 class NWPosture:
 
-    def __init__(self, chest_dict, ankle_dict, gait_bouts=None, epoch_length=1):
+    def __init__(self, chest_dict, ankle_dict, gait_bouts=None, epoch_length=1,
+                 subject_id="", study_code="", coll_id=""):
         """Class that processes chest- and ankle-worn accelerometer data to determine postures.
 
         Algorithm description:
@@ -29,6 +30,7 @@ class NWPosture:
             a sit-to-stand detector, and a whackload of logic.
 
         arguments:
+        -subject_id, study_code, coll_id: strings, details of collection
         -chest_dict, ankle_dict: dictionary used to specify axis orientations and input data.
             -Required format:
                 -{"Anterior": array, "Up": array, "Left": array, "start_stamp": timestamp, "sample_rate": integer}
@@ -41,6 +43,9 @@ class NWPosture:
         self.chest = chest_dict
         self.ankle = ankle_dict
         self.epoch_length = epoch_length
+        self.study_code = study_code
+        self.subject_id = subject_id
+        self.coll_id = coll_id
 
         # RUNS METHODS
         self.crop_data()
@@ -131,22 +136,20 @@ class NWPosture:
         if self.df_gait is None:
             return gait_mask
 
-        # Posture GS format -----------------------------------------
+        # NWGait format --------------------------------------------
         try:
-            print("Creating gait mask - REFORMAT FOR NWGAIT OUTPUT!")
+            if self.df_gait is not None:
+                for row in self.df_gait.itertuples():
+                    start = int((row.start_timestamp - self.chest['start_stamp']).total_seconds())
+                    stop = int((row.end_timestamp - self.chest['start_stamp']).total_seconds())
+                    gait_mask[int(start):int(stop)] = 1
 
+        # Posture GS format -----------------------------------------
+        except (KeyError, AttributeError):
             if self.df_gait is not None:
                 for row in self.df_gait.itertuples():
                     start = int((row.Start - self.chest['start_stamp']).total_seconds())
                     stop = int((row.Stop - self.chest['start_stamp']).total_seconds())
-                    gait_mask[int(start):int(stop)] = 1
-
-        # NWGait format --------------------------------------------
-        except KeyError:
-            if self.df_gait is not None:
-                for row in self.df_gait.itertuples():
-                    start = int((row.start_timestamp - self.chest['start_stamp']).total_seconds())
-                    stop = int((row.stop_timestamp - self.chest['start_stamp']).total_seconds())
                     gait_mask[int(start):int(stop)] = 1
 
         return gait_mask
@@ -226,6 +229,8 @@ class NWPosture:
         posture['ankle_up'] = up_angle
         posture['ankle_left'] = left_angle
         posture['ankle_vm'] = pd.Series(vm)
+        for i in range(posture.shape[0] - len(self.gait_mask)):
+            self.gait_mask = np.append(self.gait_mask, 0)
         posture['ankle_gait_mask'] = self.gait_mask
         posture['ankle_dynamic'] = posture[['ankle_gait_mask', 'ankle_vm']].sum(axis=1)
 
@@ -244,7 +249,6 @@ class NWPosture:
                     & (posture['ankle_up'] < 110) & (posture['ankle_up'] >= 45), 'ankle_posture'] = "horizontal"
 
         # Flags gait
-        # posture.loc[(posture['ankle_dynamic'] > 0), 'ankle_posture'] = "dynamic"
         posture.loc[(posture['ankle_gait_mask'] > 0), 'ankle_posture'] = "gait"
 
         fig = None
@@ -371,7 +375,6 @@ class NWPosture:
 
         def initial_processing():
             # Data epoching ----------------------------------------------------------------------------
-            print("\nEpoching data...")
             ankle_ant = self.epochinator3000(data=self.ankle['Anterior'],
                                              sample_rate=self.ankle['sample_rate'],
                                              epoch_length=self.epoch_length)
@@ -411,9 +414,8 @@ class NWPosture:
                                                 periods=length,
                                                 freq=f"{self.epoch_length}S"))
 
-            print("Epoching complete.")
-
             # Posture processing based on angles ------------------------------------------------------
+            print("-Running individual posture detection algorithm...")
             ankle_post, fig = self.ankle_posture(anterior=ankle_ant, up=ankle_up, left=ankle_left,
                                                  epoch_ts=epoch_ts, plot_results=show_plots)
 
@@ -429,6 +431,8 @@ class NWPosture:
             df_posture = df_posture.drop("chest_vm", axis=1)
 
             # Combining ankle and chest postures ------------------------------------------------------
+            print("-Combining chest and ankle data...")
+
             df_posture['posture'] = df_posture['chest_posture']
 
             # chest sit/stand + ankle sit = sit
@@ -467,6 +471,7 @@ class NWPosture:
 
         def format_nwposture_output(df):
 
+            print("-Flagging gait bouts as 'standing'...")
             df = df.reset_index()
 
             df['timestamp'] = [i.round(freq='1S') for i in df['timestamp']]
@@ -492,7 +497,7 @@ class NWPosture:
             indexes = [0]
 
             for i in range(df.shape[0]):
-                if i > indexes[-1]:
+                if i >= indexes[-1]:
                     index = get_index(data=df[colname], start_index=i)
                     indexes.append(index)
                 try:
@@ -595,7 +600,7 @@ class NWPosture:
 
             return df_out.reset_index(drop=True)
 
-        def format_posture_change_dfs(df1s, df_peaks, incl_peak_vals=False):
+        def format_posture_change_dfs(df1s, transition_indexes, df_peaks, incl_peak_vals=False):
 
             # Index (1s epochs) of first standing (gait) bout: used as starting point for algorithm
             try:
@@ -604,7 +609,7 @@ class NWPosture:
                 first_standing = 0
 
             # indexes of transitions that occur at/after first standing
-            use_indexes = [i for i in transitions_indexes if i >= first_standing]
+            use_indexes = [i for i in transition_indexes if i >= first_standing]
 
             # First row in df1s for each posture --> bouts
             df_index = pd.DataFrame({"timestamp": [df1s.iloc[i]['timestamp'] for i in use_indexes],
@@ -639,7 +644,7 @@ class NWPosture:
 
         def pass1(win_size, df_peak, df1s):
 
-            print("\nUsing known standing/gait periods to adjust sit/stand classifications...")
+            print("-Using known standing/gait periods to adjust sit/stand classifications...")
 
             input = np.array(df1s['posture'])
             ankle = np.array(df1s["ankle_posture"])
@@ -671,19 +676,18 @@ class NWPosture:
                     output_postures[prev_row_ind:curr_row.Ind] = "sit"
 
                 if "sit" in window[:win_size] and "sitstand" in window[-win_size:]:
-                    output_postures[curr_row.Ind - win_size:curr_row.Ind] = pd.Series(window[:win_size]).replace({"sitstand": "sit"})
+                    output_postures[curr_row.Ind - win_size:curr_row.Ind] = \
+                        pd.Series(window[:win_size]).replace({"sitstand": "sit"})
                     if "horizontal" not in ankle_window[:-win_size]:
                         output_postures[curr_row.Ind:df_peak.iloc[row+1]['Ind']] = 'stand'
                     if "horizontal" in ankle_window[-win_size:]:
                         output_postures[curr_row.Ind:df_peak.iloc[row+1]['Ind']] = 'sit'
 
-            print("Complete.")
-
             return output_postures
 
         def reclassify_pre_firststand(df, input, win_size, df_peaks):
 
-            print("\nReclassifying postures detected before first standing period...")
+            print("-Reclassifying postures detected before first standing period...")
 
             v2 = np.array(input)
 
@@ -716,13 +720,11 @@ class NWPosture:
                     except IndexError:
                         pass
 
-            print("Complete.")
-
             return v2
 
         def pass2(postures):
 
-            print("\nApplying final layer of logic...")
+            print("-Applying final layer of logic...")
 
             data = np.array(postures)
 
@@ -755,18 +757,45 @@ class NWPosture:
                                 curr_ind = k
                                 break
 
-            print("Algorithm complete.")
-
             return data
+
+        def format_output(df):
+            df.columns = ["start_timestamp", 'posture']
+
+            df['study_code'] = [self.study_code for i in range(df.shape[0])]
+            df['subject_id'] = [self.subject_id for i in range(df.shape[0])]
+            df['coll_id'] = [self.coll_id for i in range(df.shape[0])]
+
+            end = list(df['start_timestamp'].iloc[1:])
+            end.append(ts[-1].round("1S"))
+            df['end_timestamp'] = end
+            df['posture_bout_num'] = np.arange(1, df.shape[0] + 1)
+            bouts = df[['study_code', 'subject_id', 'coll_id', 'posture_bout_num',
+                        'start_timestamp', 'end_timestamp', 'posture']]
+
+            for row in bouts.itertuples():
+                remaining = bouts.iloc[row.Index:]['posture'].unique()
+                if len(remaining) == 1 and row.posture == remaining[0]:
+                    bouts.iloc[row.Index]['end_timestamp'] = bouts.iloc[-1]['end_timestamp']
+                    break
+            try:
+                bouts = bouts.iloc[:row.Index + 1]
+            except IndexError:
+                bouts = bouts.iloc[:row.Index]
+
+            return bouts
 
         t0 = datetime.datetime.now()
 
         ts = pd.date_range(start=self.chest['start_stamp'], periods=len(self.chest['Anterior']),
                            freq="{}ms".format(1000 / self.chest['sample_rate']))
 
+        print("-Initial combination...")
         df_posture = initial_processing()
         df1s = format_nwposture_output(df=df_posture)
-        transitions_indexes = find_posture_changes(df=df_posture, colname='posture')
+        transition_indexes = find_posture_changes(df=df_posture, colname='posture')
+
+        print("-Finding sit-to-stand transitions...")
         cwt_power = process_for_peak_detection(obj=self)
         peaks, thresh, processed_data = detect_peaks(wavelet_data=cwt_power, method='le',
                                                      sample_rate=self.chest['sample_rate'],
@@ -776,12 +805,18 @@ class NWPosture:
                                    stop_time=df_posture.iloc[-1]['timestamp'],
                                    sts_peaks=peaks, raw_timestamps=ts, sample_f=self.chest['sample_rate'],
                                    calculate_peak_values=False)
-        df_index, df_use, first_stand_index = format_posture_change_dfs(df1s=df1s, df_peaks=df_peaks, incl_peak_vals=False)
+
+        print("-First pass on sit/stand differentiation...")
+        df_index, df_use, first_stand_index = format_posture_change_dfs(df1s=df1s, df_peaks=df_peaks,
+                                                                        incl_peak_vals=False,
+                                                                        transition_indexes=transition_indexes)
         df1s["v1"] = pass1(win_size=8, df1s=df1s, df_peak=df_use)
         transitions_indexes2 = find_posture_changes(df=df1s, colname='v1')
         df_index2 = df1s.iloc[transitions_indexes2][["timestamp", 'posture', 'transition', 'GS', "v1"]].reset_index()
 
-        prestand_index = df_index2.loc[df_index2['timestamp'] <= df1s.iloc[first_stand_index]['timestamp']].sort_values("timestamp", ascending=False).reset_index(drop=True)
+        print("-Dealing with data before first standing period...")
+        prestand_index = df_index2.loc[df_index2['timestamp'] <= \
+                         df1s.iloc[first_stand_index]['timestamp']].sort_values("timestamp", ascending=False).reset_index(drop=True)
         try:
             prestand_index.columns = ['Ind', 'timestamp', 'posture', 'transition', 'GS', 'v1']
         except ValueError:
@@ -791,10 +826,14 @@ class NWPosture:
                                                df_peaks=df_peaks.loc[df_peaks['timestamp'] <=
                                                                      df1s.iloc[first_stand_index]['timestamp']])
 
-        df1s['v3'] = pass2(postures=df1s['v2'])
+        print("-Second sit/stand differentiation...")
+        df1s['v3'] = pass2(postures=df1s['v2'])  # final posture data
+
+        print("Algorithm complete.")
 
         transitions_indexes3 = find_posture_changes(df=df1s, colname='v3')
-        df_index3 = df1s.iloc[transitions_indexes3][["timestamp", 'GS', "v3"]].reset_index()
+        df_index3 = df1s.iloc[transitions_indexes3][["timestamp", "v3"]].reset_index(drop=True)
+        bouts = format_output(df=df_index3)
 
         t1 = datetime.datetime.now()
         t_total = round((t1-t0).total_seconds(), 1)
@@ -803,7 +842,7 @@ class NWPosture:
         print("\n=================================================")
         print(f"Processing time: {t_total} seconds ({round(t_total/coll_dur, 1)} sec/hr)")
 
-        return df1s, df_peaks, df_index3
+        return df1s, bouts, df_peaks
 
 
 def filter_signal(data, filter_type, low_f=None, high_f=None, notch_f=None, notch_quality_factor=30.0,
@@ -847,7 +886,7 @@ def filter_signal(data, filter_type, low_f=None, high_f=None, notch_f=None, notc
     return filtered_data
 
 
-def plot_all(df1s, df_peaks, show_v0=True, show_v1=True, show_v2=True, show_v3=True, collapse_lying=True):
+def plot_all(df1s, df_peaks=None, show_v0=True, show_v1=True, show_v2=True, show_v3=True, collapse_lying=True):
     plt.close('all')
 
     fig, ax = plt.subplots(6, sharex='col', figsize=(14, 9), gridspec_kw={'height_ratios': [.75, .75, .75, .75, 1, .25]})
@@ -862,16 +901,16 @@ def plot_all(df1s, df_peaks, show_v0=True, show_v1=True, show_v2=True, show_v3=T
 
     ax[1].plot(df1s['timestamp'], df1s['chest_posture'], color='black', label='ChestPosture', zorder=1)
 
-    for row in df_peaks.itertuples():
-        if row.index == 0:
-            print(row.index)
-            ax[1].axvline(x=row.timestamp, color='limegreen', zorder=0, label='STS_peak',
-                          linestyle='dashed' if df1s.iloc[row.Ind]['chest_gait_mask'] == 1 else "solid")
-        else:
-            ax[1].axvline(x=row.timestamp, color='limegreen', zorder=0,
-                          linestyle='dashed' if df1s.iloc[row.Ind]['chest_gait_mask'] == 1 else "solid")
-        ax[1].fill_between(x=[row.timestamp + td(seconds=-8), row.timestamp + td(seconds=8)],
-                           y1=0, y2=7, color='grey', alpha=.3)
+    if df_peaks is not None:
+        for row in df_peaks.itertuples():
+            if row.index == 0:
+                ax[1].axvline(x=row.timestamp, color='limegreen', zorder=0, label='STS_peak',
+                              linestyle='dashed' if df1s.iloc[row.Ind]['chest_gait_mask'] == 1 else "solid")
+            else:
+                ax[1].axvline(x=row.timestamp, color='limegreen', zorder=0,
+                              linestyle='dashed' if df1s.iloc[row.Ind]['chest_gait_mask'] == 1 else "solid")
+            ax[1].fill_between(x=[row.timestamp + td(seconds=-8), row.timestamp + td(seconds=8)],
+                               y1=0, y2=7, color='grey', alpha=.3)
 
     ax[1].legend()
     ax[1].grid()
@@ -927,42 +966,3 @@ def plot_all(df1s, df_peaks, show_v0=True, show_v1=True, show_v2=True, show_v3=T
 
     ax[-1].xaxis.set_major_formatter(xfmt)
     plt.tight_layout()
-
-"""
-plt.plot(df1s['posture'], color='red')
-plt.plot(df1s['v1'], color='dodgerblue')
-plt.plot(df1s['v2'], color='orange')
-for i in df_peaks.itertuples():
-    plt.axvline(i.Ind, color='black')"""
-
-"""
-v2 = np.array(input)
-
-for i in range(df.shape[0] - 1):
-curr_row = df.iloc[i]
-
-curr_peak = df_peaks.loc[(df_peaks['timestamp'] >= curr_row['timestamp'] + td(seconds=-win_size)) &
-                         (df_peaks['timestamp'] <= curr_row['timestamp'] + td(seconds=win_size))]
-
-# If standing and no transition when standing starts --> flags previous peak to current as standing
-if v2[curr_row.Ind] == 'stand' and curr_peak.shape[0] == 0:
-    prev_peak = df_peaks.loc[df_peaks['timestamp'] < curr_row.timestamp].iloc[-1]['Ind']
-    v2[prev_peak:curr_row.Ind] = 'stand'
-
-if v2[curr_row.Ind] == 'sit' and curr_peak.shape[0] == 0:
-    prev_peak = df_peaks.loc[df_peaks['timestamp'] < curr_row.timestamp].iloc[-1]['Ind']
-    v2[prev_peak:curr_row.Ind] = 'sit'
-
-if v2[curr_row.Ind] == 'sit' and curr_peak.shape[0] > 0:
-    try:
-        prev_peak = df_peaks.loc[df_peaks['timestamp'] < curr_row.timestamp].iloc[-1]['Ind']
-        v2[prev_peak:curr_row.Ind] = 'stand'
-    except IndexError:
-        pass
-
-if v2[curr_row.Ind] == 'stand' and curr_peak.shape[0] > 0:
-    try:
-        prev_peak = df_peaks.loc[df_peaks['timestamp'] < curr_row.timestamp].iloc[-1]['Ind']
-        v2[prev_peak:curr_row.Ind] = 'sit'
-    except IndexError:
-        pass"""
