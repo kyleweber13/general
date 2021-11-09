@@ -7,67 +7,44 @@ from datetime import timedelta
 from matplotlib import dates as mdates
 xfmt = mdates.DateFormatter("%Y-%m-%d\n%H:%M:%S")
 
-"""--------------------------------------------------- Data import -------------------------------------------------"""
-
-
-def import_data(accel_filepath, cp_epochlen, gait_filepath, posture_filepath):
-
-    d = nwdata.NWData()
-    d.import_edf(file_path=accel_filepath)
-
-    df_powell = nwactivity.calc_wrist_powell(x=d.signals[0], y=d.signals[1], z=d.signals[2],
-                                             sample_rate=d.signal_headers[0]["sample_rate"], epoch_length=cp_epochlen)
-
-    # Timestamps
-    start_time = d.header["startdate"]
-    timestamps = pd.date_range(start=start_time, periods=df_powell.shape[0], freq=f"{cp_epochlen}S")
-    df_powell["Timestamp"] = timestamps
-
-    # Gait data ------------------------------------------------
-    df_gait = pd.read_csv(gait_filepath) if "csv" in gait_filepath else pd.read_excel(gait_filepath, engine='openpyxl')
-
-    # Bout durations - LIKELY ALREADY IN THE FILE
-    df_gait = df_gait[["start_timestamp", "end_timestamp", "bout_length_sec"]]
-
-    df_gait["start_timestamp"] = pd.to_datetime(df_gait["start_timestamp"])
-    df_gait["start_timestamp"] = [i.round("1S") for i in df_gait["start_timestamp"]]
-
-    df_gait["end_timestamp"] = pd.to_datetime(df_gait["end_timestamp"])
-    df_gait["end_timestamp"] = [i.round("1S") for i in df_gait["end_timestamp"]]
-
-    # Posture data --------------------------------------------
-    df_post = pd.read_csv(posture_filepath) if "csv" in posture_filepath else \
-        pd.read_excel(posture_filepath, engine='openpyxl')
-
-    df_post["start_timestamp"] = pd.to_datetime(df_post["start_timestamp"])
-    df_post["end_timestamp"] = pd.to_datetime(df_post["end_timestamp"])
-
-    return df_powell, df_gait, df_post, start_time
-
-
-"""
-df_wrist, df_gait, df_posture, start_time = import_data(accel_filepath="/Volumes/Kyle's External HD/OND06 NDWrist Data/Accelerometer/OND06_SBH_3413_GNAC_ACCELEROMETER_LWrist.edf",
-                                                        gait_filepath="/Users/kyleweber/Desktop/Posture_GS/gait_LAnkleRAnkle_OND06_3413.csv",
-                                                        posture_filepath="/Users/kyleweber/Desktop/Posture_GS/posture_bouts_OND06_3413.xlsx",
-                                                        cp_epochlen=15)
-"""
-
-
-"""--------------------------------------------------- Actual code ------------------------------------------------"""
-
 
 def import_tabular_data(accel_filepath, gait_filepath, posture_filepath, wrist_epoch_length=15):
-    df_posture = pd.read_csv(posture_filepath)
-    df_posture = df_posture[["timestamp", 'v3' if 'v3' in df_posture.columns else 'posture']]
-    df_posture.columns = ['timestamp', 'posture']
-    df_posture['timestamp'] = pd.to_datetime(df_posture['timestamp'])
+    """Imports outputs from NWGait, NWPosture, and NWActivity. Returns as separate DFs.
+
+        argument:
+        -wrist_epoch_length: epoch length in seconds used to derive wrist activity data
+
+       Currently crops data to end when posture data ends. This will throw out data after the Bittium dies.
+    """
+
+    """POSTURE"""
+    df = pd.read_csv(posture_filepath)
+    df['start_timestamp'] = pd.to_datetime(df['start_timestamp'])
+    df['end_timestamp'] = pd.to_datetime(df['end_timestamp'])
+
+    # Reconstructs bouted posture dataframe into 1-sec epoched
+    stamps = pd.date_range(start=df.iloc[0]['start_timestamp'], end=df.iloc[-1]['end_timestamp'], freq='1S')
+
+    post_dict = {"sit": 0, 'supine': 1, 'stand': 2, 'other': 3, 'prone': 4, 'sitstand': 5, 'leftside': 6,
+                 'rightside': 7}
+    keys = list(post_dict.keys())
+    posture = np.array([None] * (len(stamps) - 1))
+    for row in df.itertuples():
+        start = int((row.start_timestamp - stamps[0]).total_seconds())
+        end = int((row.end_timestamp - stamps[0]).total_seconds())
+        posture[start:end] = post_dict[row.posture]
+    posture = np.append(posture, posture[-1])
+
+    df_posture = pd.DataFrame({"timestamp": stamps, 'posture': [keys[i] for i in posture]})
 
     stop = df_posture.iloc[-1]['timestamp']
     print("REMOVE 'STOP' FUNCTIONALITY")
 
+    """WRIST"""
     df_wrist = pd.read_csv(accel_filepath)
     df_wrist = df_wrist.iloc[:int((stop - df_posture.iloc[0]['timestamp']).total_seconds() / wrist_epoch_length)]
 
+    """GAIT"""
     df_gait = pd.read_csv(gait_filepath)
     df_gait['start_timestamp'] = pd.to_datetime(df_gait['start_timestamp'])
     df_gait['end_timestamp'] = pd.to_datetime(df_gait['end_timestamp'])
@@ -76,20 +53,21 @@ def import_tabular_data(accel_filepath, gait_filepath, posture_filepath, wrist_e
     return df_posture, df_wrist, df_gait
 
 
-def combine_data(start_stamp, df_wrist, df_gait, df_posture, epoch_len=15,
-                 lying_is_sedentary=False, plot_data=False):
+def combine_data(start_stamp, df_wrist, df_gait, df_posture, wrist_epoch_len=15,
+                 lying_is_sedentary=True, plot_data=False):
     """More advanced physical activity intensity estimation that combines the outputs from
        cut-point-derived intensity with gait and posture data.
        Gait periods are set as moderate intensity. Periods of standing are set as light intensity. For each 1-sec
        period, the highest intensity is used.
         :argument
-        -df_cp: dataframe containing time series data of epoched cut-point-derived intensity
-                -columns: "Timestamp", "intensity"
+        -start_stamp: timestamp data begins, used to generate timestamps for wrist data
+        -df_wrist: dataframe containing time series data of epoched cut-point-derived intensity
+                  -columns: "Timestamp", "intensity"
         -df_gait: dataframe containing gait bout start/stop times
                 -columns: "start_timestamp", "end_timestamp"
-        -df_posture: dataframe containing bout start/stop times for each posture
-                -columns: "bout_start", "bout_end", "posture"
-        -sedentary_lying: boolean of whether to treat all supine/prone/lying on side as sedentary
+        -df_posture: dataframe containing 1-second epoched posture data
+                -columns: 'timestamp', 'posture'/'v3'
+        -lying_is_sedentary: boolean of whether to treat all supine/prone/lying on side as sedentary
                 -if False, highest intensity will be taken
                 -if True, lying periods will all be sedentary regardless of other domains' intensity measure
         :returns
@@ -119,7 +97,7 @@ def combine_data(start_stamp, df_wrist, df_gait, df_posture, epoch_len=15,
     cp = []
     for i in df_wrist["intensity"]:
         # Repeats epoch value epoch_len number of times (generates 1-sec epochs)
-        for j in range(epoch_len):
+        for j in range(wrist_epoch_len):
             cp.append(intensity_dict[i])
 
     # maintains data output length
@@ -141,11 +119,11 @@ def combine_data(start_stamp, df_wrist, df_gait, df_posture, epoch_len=15,
     # Assigns light intensity to standing bouts ---------------------------------
     # Index corresponds to number of seconds since start of collection since it's 1-second data
     standing = np.array(df_posture['posture'].replace({"sit": 0, 'stand': 1, 'gait': 0, 'other': 0, 'sitstand': 0,
-                                                       'supine': 0, 'prone': 0, 'lyingleft': 0, 'lyingright': 0}))
+                                                       'supine': 0, 'prone': 0, 'leftside': 0, 'rightside': 0}))
 
     # Flags regions where posture is lying down in any posture ------------------------------------
     lying = np.array(df_posture['posture'].replace({"sit": 0, 'stand': 0, 'gait': 0, 'other': 0, 'sitstand': 0,
-                                                    'supine': 1, 'prone': 1, 'lyingleft': 1, 'lyingright': 1}))
+                                                    'supine': 1, 'prone': 1, 'leftside': 1, 'rightside': 1}))
 
     # finalizing data -----------
     epoch_stamps = epoch_stamps[:len(cp)]
@@ -153,8 +131,6 @@ def combine_data(start_stamp, df_wrist, df_gait, df_posture, epoch_len=15,
                            "Stand": standing, "Lying": lying})
 
     # All sedentary epochs will be sedentary regardless of wrist/gait intensity ------------------------------------
-
-    print("===== To fix: is all lying sedentary regardless of wrist movement? =====")
 
     final_intensity = []
     for row in df_out.itertuples():
@@ -243,18 +219,17 @@ def combine_data(start_stamp, df_wrist, df_gait, df_posture, epoch_len=15,
     return df_out, df_bout
 
 
-df_posture, df_wrist, df_gait = import_tabular_data(accel_filepath = "W:/NiMBaLWEAR/OND09/analytics/activity/epoch/OND09_0020_01_EPOCH_ACTIVITY.csv",
-                                                    gait_filepath = "W:/NiMBaLWEAR/OND09/analytics/gait/bouts/OND09_0020_01_GAIT_BOUTS.csv",
-                                                    posture_filepath = "C:/users/ksweber/Desktop/OND09_0020_PostureTest.csv")
-df_ts, df_bout = combine_data(start_stamp=pd.to_datetime("2021-09-27 15:12:25"),
+"""
+# ----------------------------------------------------- Sample run ----------------------------------------------------
+subj = '0008'
+df_posture, df_wrist, df_gait = import_tabular_data(accel_filepath=f"W:/NiMBaLWEAR/OND09/analytics/activity/epoch/OND09_{subj}_01_EPOCH_ACTIVITY.csv",
+                                                    gait_filepath=f"W:/NiMBaLWEAR/OND09/analytics/gait/bouts/OND09_{subj}_01_GAIT_BOUTS.csv",
+                                                    posture_filepath=f"C:/users/ksweber/Desktop/OND09_{subj}_Posture2.csv")
+df_ts, df_bout = combine_data(start_stamp=pd.to_datetime(df_posture.iloc[0]['timestamp']),
                               df_wrist=df_wrist, df_gait=df_gait, df_posture=df_posture,
                               lying_is_sedentary=True, plot_data=True)
-
+"""
 
 # TODO
 # make sure timestamps in bouts are not flagging epochs as multiple things
     # Kit: should bout_end and next bout_start be 1-sec apart or same timestamp?
-# Time resolution? Round to nearest second?
-# Minimum bout durations?
-# Should all lying be sedentary regardless of wrist intensity?
-# Wrist dataframe has no timestamps --> assuming start time is same as wrist EDF
