@@ -7,7 +7,6 @@ from numpy.linalg import norm
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 xfmt = mdates.DateFormatter("%Y-%m-%d\n%H:%M:%S")
-import pandas as pd
 from datetime import timedelta as td
 from scipy import signal
 from Filtering import filter_signal
@@ -705,7 +704,7 @@ def process_sit2standpy(data, start_stamp, sample_rate, stand_sit=False):
     return df_s2spy
 
 
-def remove_toosoon_transitions(n_seconds=4):
+def remove_toosoon_transitions(df_transition, n_seconds=4):
     """Removes sit/stand transitions that occur too close in time to previous transition.
        Excludes 'newest' transition in that case.
 
@@ -714,20 +713,42 @@ def remove_toosoon_transitions(n_seconds=4):
     """
 
     # Boolean array for transitions to keep
-    keep = np.array([True]*df_sts.shape[0])
+    keep = np.array([True]*df_transition.shape[0])
 
-    for i in range(df_sts.shape[0]-1):
-        curr_time = df_sts.iloc[i]['Seconds']  # current transition time
-        next_time = df_sts.iloc[i+1]['Seconds']  # next transition time
+    for i in range(df_transition.shape[0]-1):
+        curr_time = df_transition.iloc[i]['Seconds']  # current transition time
+        next_time = df_transition.iloc[i+1]['Seconds']  # next transition time
 
         if next_time - curr_time < n_seconds:
             keep[i+1] = False
 
-    df_sts['Keep'] = keep
-    df_sts2 = df_sts.loc[df_sts['Keep']]
-    df_sts2 = df_sts2.reset_index(drop=True)
+    df_transition['Keep'] = keep
+    df_out = df_transition.loc[df_transition['Keep']]
+    df_out = df_out.reset_index(drop=True)
 
-    return df_sts2
+    return df_out
+
+
+def remove_transitions_during_gait(gait_mask, df_transitions, pad_len=1):
+
+    df = df_transitions.copy()
+    gait_mask = np.array(gait_mask)
+
+    idx = []
+    for row in df.itertuples():
+        epoch = gait_mask[row.Seconds - pad_len:row.Seconds + pad_len + 1]
+
+        # Accepts transition if whole epoch (transitions +- pad_len) is not gait
+        if row.Type == 'Stand-sit':
+            if sum(epoch) < pad_len * 2:
+                idx.append(row.Index)
+
+        # Accepts transition if whole epoch (transitions +- pad_len) is not gait
+        if row.Type == 'Sit-stand':
+            if sum(epoch) == 0:
+                idx.append(row.Index)
+
+    return df.iloc[idx]
 
 
 def fill_between_walks(postures, gait_mask, df_transitions, max_break=5):
@@ -773,6 +794,7 @@ def fill_between_walks(postures, gait_mask, df_transitions, max_break=5):
 
                     # if no stand-sits in window, postures become 'stand'
                     if t.shape[0] == 0:
+                        print(gait_end, next_start)
                         postures[gait_end:next_start] = 'stand'
                         n_affected += 1
 
@@ -786,7 +808,15 @@ def fill_between_walks(postures, gait_mask, df_transitions, max_break=5):
 def apply_logic(df_transitions, gait_mask, postures, first_walk_index, first_pass, quiet=False):
     """Reclassifies postures based on context relating unknown sitstand periods to lying or known standing periods."""
 
+    curr_postures = []
+    prev_postures = []
+    next_postures = []
+    next_diff_postures = []
+    curr_sts = []
+    next_sts = []
+
     gait_mask = np.array(gait_mask)
+    postures = np.array(postures)
 
     # First pass of data runs it chronologically
     # Starts at first_walk_index
@@ -798,6 +828,22 @@ def apply_logic(df_transitions, gait_mask, postures, first_walk_index, first_pas
     # Second pass on data runs it reverse chronologically
     # Starts at first_walk_index and runs backwards
     if not first_pass:
+
+        # Deals with posture that occurs right before first walk if no STS found right at start of walk ------
+        last_sts = df_transitions.loc[(df_transitions['Seconds'] <= first_walk_index) &
+                                      (df_transitions['Type'] == 'Sit-stand')].iloc[-1]
+
+        prev_post = postures[first_walk_index - 1]  # posture before walk
+        prev_post_ind = 0  # default if collection starts with prev_post
+        for i in range(first_walk_index):
+            if postures[first_walk_index - i] != prev_post:
+                prev_post_ind = i
+                break
+
+        ind = max([last_sts['Seconds'], prev_post_ind])
+
+        postures[ind:first_walk_index] = 'stand'
+
         print("\nRunning second pass of context logic to fix pre-first gait bout data...")
         # Reverses order of dataframe
         df_transitions = df_transitions.loc[df_transitions['Seconds'] <
@@ -805,13 +851,6 @@ def apply_logic(df_transitions, gait_mask, postures, first_walk_index, first_pas
                                                                           ascending=False).reset_index(drop=True)
         prev_post_end = df_transitions.iloc[0]['Seconds']
         prev_post = postures[prev_post_end]
-
-    curr_postures = []
-    prev_postures = []
-    next_postures = []
-    next_diff_postures = []
-    curr_sts = []
-    next_sts = []
 
     for row in df_transitions.itertuples():
 
@@ -856,11 +895,14 @@ def apply_logic(df_transitions, gait_mask, postures, first_walk_index, first_pas
                 prev_post_end = row.Seconds - i
                 break
 
+        prev_post_start = None
         for j in range(prev_post_end):
             if postures[prev_post_end - j] != prev_post:
                 prev_post_start = prev_post_end - j
                 prev_postures.append(f"{prev_post} ({prev_post_start} - {prev_post_end})")
                 break
+        if prev_post_start is None:
+            prev_post_start = 0
 
         # Finds next posture that is not next_post or 'sitstand' -------
         for i in range(row.Seconds+1, len(postures)):
@@ -874,6 +916,10 @@ def apply_logic(df_transitions, gait_mask, postures, first_walk_index, first_pas
         end_ind = min([next_transition, next_post_end])
 
         if not quiet:
+            try:
+                pp = prev_post_start
+            except:
+                pp = None
             print(
                 f"Curr={curr_post}({row.Seconds}), prev={prev_post}({prev_post_start}-{prev_post_end}), "
                 f"next={next_post}({next_post_start}-{next_post_end}), "
@@ -908,11 +954,15 @@ def apply_logic(df_transitions, gait_mask, postures, first_walk_index, first_pas
         if curr_post == 'sitstand':
             # Stand-to-sit transitions ------
             if row.Type == 'Stand-sit':
+                # if next_post == 'sit':
+                #    postures[prev_post_end:next_post_start] = 'stand'
+
                 if next_post == 'sit':
-                    postures[prev_post_end:next_post_start] = 'stand'
+                    r = ['sit' if gait_mask[x] == 0 else postures[x] for x in range(row.Seconds, next_post_start)]
+                    postures[row.Seconds:next_post_start] = r
+                    postures[prev_post_end:row.Seconds] = 'stand'
 
                 if prev_post == 'sit':
-                    # postures[prev_post_end:row.Seconds] = 'sit'
                     r = ['sit' if gait_mask[x] == 0 else postures[x] for x in range(prev_post_end, row.Seconds)]
                     postures[prev_post_end:row.Seconds] = r
 
@@ -920,20 +970,10 @@ def apply_logic(df_transitions, gait_mask, postures, first_walk_index, first_pas
 
                 if prev_post == 'stand':
                     if next_post in ['other', 'sitstand']:
-                        # postures[row.Seconds:next_post_start] = 'sit'
                         r = ['sit' if gait_mask[x] == 0 else postures[x] for x in range(row.Seconds, next_post_start)]
                         postures[row.Seconds:next_post_start] = r
 
-                if next_post == 'sit':
-                    # postures[row.Seconds:next_post_start] = 'sit'
-                    r = ['sit' if gait_mask[x] == 0 else postures[x] for x in range(row.Seconds, next_post_start)]
-                    postures[row.Seconds:next_post_start] = r
-
-                    postures[prev_post_end:row.Seconds] = 'stand'
-
                 if next_post == 'stand':
-                    postures[prev_post_end:row.Seconds] = 'stand'
-                    # postures[row.Seconds:next_post_start] = 'sit'
                     r = ['sit' if gait_mask[x] == 0 else postures[x] for x in range(row.Seconds, next_post_start)]
                     postures[row.Seconds:next_post_start] = r
 
@@ -1009,13 +1049,14 @@ def final_logic(postures, df_transitions, split_difference=False):
 
             # Dealing with sitstand postures -------
             if postures[i] == 'sitstand':
-                curr_post = postures[i]
+                curr_post = 'sitstand'
 
                 for j in range(i+1, len(postures)):
-                    if postures[j] != curr_post:
+                    if postures[j] != 'sitstand':
                         # Crops df_transitions to span from curr_post to j
                         t = df_transitions.loc[(df_transitions['Seconds'] >= i) & (df_transitions['Seconds'] <= j)]
 
+                        print(i, j, postures[j], list(t['Seconds']), list(t['Type']))
                         # Logic if transitions are found before posture change
                         start_idx = i
 
@@ -1029,7 +1070,8 @@ def final_logic(postures, df_transitions, split_difference=False):
 
                             # Deals with stand-sit transitions
                             if row.Type == 'Stand-sit':
-                                postures[start_idx:row.Seconds] = 'stand'
+                                # postures[row.Seconds:j] = 'sit'
+                                postures[i:j] = 'sit'
 
                             start_idx = row.Seconds
 
@@ -1248,11 +1290,10 @@ def plot_posture_comparison(show_transitions=True, show_v0=True, show_v1=True, s
     ax[0].legend(loc='lower right')
 
     if show_transitions:
-        for row in df_sts.itertuples():
+        for row in df_sts2.itertuples():
             ax[0].axvline(row.Seconds if not use_timestamps else start_ts + td(seconds=row.Seconds),
                           color='limegreen' if row.Type == 'Sit-stand' else 'red',
-                          linestyle='dotted' if not row.Keep else'solid',
-                          lw=2 if row.Keep else 1)
+                          linestyle='dashed', lw=1.5)
 
     ax[0].grid()
 
@@ -1329,8 +1370,8 @@ def plot_posture_comparison(show_transitions=True, show_v0=True, show_v1=True, s
 
     return fig, ax
 
+
 # df1s, bouts, df_peaks = post.calculate_postures(goldstandard_df=None)
-og_posture = df1s['posture']
 
 converted_to_mss = convert_accel_units(to_mss=True, to_g=False)
 
@@ -1355,19 +1396,20 @@ df_stsit = process_sit2standpy(data=np.array([post.chest['Anterior'], post.chest
 # df_sts = df_sts.loc[df_sts['Type'] == 'Stand-sit'].append(df_sitst)
 df_sts = df_stsit.append(df_sitst)
 df_sts = df_sts.sort_values("Seconds").reset_index(drop=True)
-df_sts2 = remove_toosoon_transitions(n_seconds=2)  # 4
+df_sts2 = remove_transitions_during_gait(gait_mask=df1s['chest_gait_mask'], df_transitions=df_sts, pad_len=1)
+df_sts2 = remove_toosoon_transitions(df_transition=df_sts2, n_seconds=3)  # 4
 
-df1s['v1'] = fill_between_walks(postures=og_posture, gait_mask=df1s['chest_gait_mask'], df_transitions=df_sts2, max_break=10)
+df1s['v1'] = fill_between_walks(postures=df1s['posture'], gait_mask=df1s['chest_gait_mask'], df_transitions=df_sts2, max_break=10)
 
 # first_walk_index = int((df_gait.loc[df_gait['start_timestamp'] >= post.ankle['start_stamp']].iloc[0]['start_timestamp'] - post.ankle['start_stamp']).total_seconds())
 
-df1s['v2'], df_logic1 = apply_logic(df_transitions=df_sts2, gait_mask=df1s['chest_gait_mask'], first_walk_index=first_walk_index, postures=og_posture, first_pass=True, quiet=False)
-df1s['v3'], df_logic2 = apply_logic(df_transitions=df_sts2, gait_mask=df1s['chest_gait_mask'], first_walk_index=first_walk_index, postures=df1s['v2'].copy(), first_pass=False, quiet=True)
+df1s['v2'], df_logic1 = apply_logic(df_transitions=df_sts2, gait_mask=df1s['chest_gait_mask'], first_walk_index=first_walk_index, postures=df1s['v1'], first_pass=True, quiet=False)
+df1s['v3'], df_logic2 = apply_logic(df_transitions=df_sts2, gait_mask=df1s['chest_gait_mask'], first_walk_index=first_walk_index, postures=df1s['v2'].copy(), first_pass=False, quiet=False)
 # df1s['v4'] = final_logic2(postures=df1s['v3'].copy(), split_sitstand_anomalies=False)
 df1s['v4'] = final_logic(postures=df1s['v3'], df_transitions=df_sts2)
 df1s['v4'] = fill_other(postures=df1s['v4'])
 
-fig = plot_posture_comparison(show_transitions=True, show_v0=True, show_v2=True, show_v3=1, show_v4=1, show_gs=True, use_timestamps=False, collapse_lying=False)
+fig = plot_posture_comparison(show_transitions=True, show_v0=False, show_v2=False, show_v3=False, show_v4=True, show_gs=True, use_timestamps=False, collapse_lying=False)
 # fig = plot_posture_comparison(show_transitions=True, show_v0=True, show_v2=False, show_v3=False, show_v4=True, show_gs=False, use_timestamps=False, collapse_lying=False)
 # check_accuracy(test_list=df1s['v1'], version_name="V1", crop_start=first_walk_index)
 # check_accuracy(test_list=df1s['v2'], version_name="V2", crop_start=df1s.loc[df1s['GS'] != 'other'].iloc[0]['index']+1)
@@ -1378,5 +1420,6 @@ fig = plot_posture_comparison(show_transitions=True, show_v0=True, show_v2=True,
 # Remove unnecessary columns in df1s when actually running code
 # removed 'sit' classification from NWPosture2
 # need to stop overwriting walking with flawed logic
-
-# GS --> remove 'others' --> extend prev/next to midpoint
+# final final layer of logic to remove remaining sitstand if no STS and surrounded by same posture
+    # see GS001 ~ 1000 seconds
+    # final_logic() function
