@@ -138,3 +138,8 @@ df = check_start_times(files)
 df = calculate_sample_pad(df)
 data = create_signal(df)
 """
+
+from ECG_Organized.RunSmital import process_snr
+data = open_pickle("C:/Users/ksweber/Desktop/OND90_9999_Combined.pickle")
+snr = process_snr(out_dir="C:/Users/ksweber/Desktop/", edf_folder="C:/Users/ksweber/Desktop/", ecg_obj=data,
+                  ecg_fname="OND90_9999_Combined.pickle", window_len=3600, overlap_secs=60, quiet=True)
