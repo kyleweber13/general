@@ -97,7 +97,7 @@ def create_snr_bouts(snr_signal, sample_rate, start_stamp, thresholds=(5, 15), s
 def create_hq_ecg_signal(df_snr, ecg_signal):
     """Uses SNR data to zero-out the ECG signal during periods of poor quality data.
 
-        argumnets:
+        argumennts:
         -df_snr: output from create_snr_bouts()
         -ecg_signal: raw or filtered signal
 

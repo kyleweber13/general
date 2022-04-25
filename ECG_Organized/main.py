@@ -97,3 +97,7 @@ def optional_function_calls():
     plot_smital_bouts(ecg_signal=data.signal, sample_rate=data.fs, snr_signal=data.snr, df_snr_bouts=df_snr, ds_ratio=3)
 
     plot_for_nw_detection(ecg_obj=data, df_nw=df_nw.loc[df_nw['full_id'] == subj])
+
+
+import pandas as pd
+import os
