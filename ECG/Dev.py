@@ -284,7 +284,7 @@ def run_deltahr_screen(df_peaks: pd.DataFrame, ecg_signal: np.array or list, sam
 
 
 def readd_highly_correlated_peaks(df_removed_beats, df_valid, sample_rate, ecg_signal, timestamps, correl_template,
-                                  zncc_thresh=.7, window_size=.2, plot_data=False):
+                                  zncc_thresh=.7, window_size=.2, min_amp=200, plot_data=False):
     """ Goes through peaks that have been removed to check for more appropriate peaks to re-include in their
         vicinity. For each peak, a zero-normalized cross-correlation is run
 
@@ -301,6 +301,7 @@ def readd_highly_correlated_peaks(df_removed_beats, df_valid, sample_rate, ecg_s
         -zncc_thresh: threshold for ZNCC value for peak to be included
 
         -window_size: window size in seconds around each peak to look for a more highly-correlated peak
+        -min_amp: minimum peak amplitude for re-inclusion
 
         returns:
         -dataframe that combines df_valid with re-added peaks.
@@ -323,6 +324,7 @@ def readd_highly_correlated_peaks(df_removed_beats, df_valid, sample_rate, ecg_s
         max_zi = np.argmax(check_z) + int(fs - fs * window_size)  # index of peak with highest correlation
         offset = int(max_zi - fs)  # peak index relative to initial peak
         check_val = z[max_zi]  # max zncc value
+        height = abs(ecg_signal[row.idx + offset])  # peak amplitude at max ZNCC value
 
         if plot_data:
             fig, ax = plt.subplots(2, sharex='col')
@@ -342,9 +344,10 @@ def readd_highly_correlated_peaks(df_removed_beats, df_valid, sample_rate, ecg_s
 
         # data to add to df: initial index, new_index, zncc value,
         #     boolean if zncc value higher than initial peak's zncc value and if value above threshold
-        add_peaks.append([row.idx, row.idx + offset, z[fs], check_val, check_val > z[fs] and check_val >= zncc_thresh])
+        add_peaks.append([row.idx, row.idx + offset, z[fs], check_val, height,
+                          check_val > z[fs] and check_val >= zncc_thresh and height >= min_amp])
 
-    df_zncc = pd.DataFrame(add_peaks, columns=['idx', 'idx_corr', 'r_idx', 'r_idx_corr', 'valid'])
+    df_zncc = pd.DataFrame(add_peaks, columns=['idx', 'idx_corr', 'r_idx', 'r_idx_corr', 'height', 'valid'])
     df_zncc['start_time'] = timestamps[df_zncc['idx_corr']]
 
     df_readd = df_zncc.loc[df_zncc['valid']]
@@ -443,7 +446,7 @@ def screen_peak_amplitudes(peaks, peak_heights, sample_rate, timestamps, ecg_sig
     return df_valid, df_invalid
 
 
-def readd_based_on_location(sample_rate, df_invalid, df_valid, margin=.1):
+def readd_based_on_location(sample_rate, df_invalid, df_valid, ecg_signal, margin=.1, amplitude_thresh=500):
     margin_samples = int(margin * sample_rate)
     readd_idx = []
     row_idx = []
@@ -456,14 +459,17 @@ def readd_based_on_location(sample_rate, df_invalid, df_valid, margin=.1):
         n_beats = next_beat.name - last_beat.name
         exp_ts = last_beat.start_time + timedelta(seconds=gap_window / n_beats * (row.Index - last_beat.name))
 
-        # exp_ts = last_beat.start_time + timedelta(seconds=(next_beat.start_time - last_beat.start_time).total_seconds()/2)
-
         error = abs((row.start_time - exp_ts).total_seconds())
 
         if error < margin:
-            readd_idx.append(row.idx - margin_samples +
-                             np.argmax(filt[row.idx - margin_samples:row.idx + margin_samples]))
-            row_idx.append(row.Index)
+            curr_amp = ecg_signal[row.idx]
+            mean_amp = np.mean([ecg_signal[last_beat.idx], ecg_signal[next_beat.idx]])
+            valid_amp = abs(curr_amp - mean_amp) < amplitude_thresh
+
+            if valid_amp:
+                readd_idx.append(row.idx - margin_samples +
+                                 np.argmax(filt[row.idx - margin_samples:row.idx + margin_samples]))
+                row_idx.append(row.Index)
 
     df_readd = df_invalid.loc[row_idx]
     df_final = pd.concat([df_readd, df_valid])
@@ -472,11 +478,39 @@ def readd_based_on_location(sample_rate, df_invalid, df_valid, margin=.1):
     df_final['hr'] = calculate_inst_hr(sample_rate=sample_rate, df_peaks=df_final, peak_colname='idx',
                                        min_quality=3, max_break=3)
 
-    return df_final
+    return df_final, df_invalid.loc[[i not in row_idx for i in df_invalid.index]]
+
+
+def jumping_epoch_hr(sample_rate, peaks, timestamps, epoch_len=15):
+    print(f"\nEpoching data into {epoch_len}-second windows...")
+
+    epoch_samples = int(sample_rate * epoch_len)
+
+    p = np.array(peaks)
+    epoch_idxs = range(0, len(timestamps), epoch_samples)
+    hrs = []
+    beats = []
+
+    for epoch_idx in tqdm(epoch_idxs):
+        epoch_p = sorted(np.where((p >= epoch_idx) & (p < epoch_idx + epoch_samples))[0])
+        epoch_p = p[epoch_p]
+        n_beats = len(epoch_p)
+        beats.append(n_beats)
+
+        try:
+            dt = (epoch_p[-1] - epoch_p[0]) / sample_rate
+            hr = (n_beats - 1) / dt * 60
+            hrs.append(round(hr, 1))
+        except (IndexError, ValueError):
+            hrs.append(None)
+
+    df_epoch = pd.DataFrame({"start_time": ecg.ts[epoch_idxs], "idx": epoch_idxs, 'n_beats': beats, 'hr': hrs})
+
+    return df_epoch
 
 
 def plot_analysis_stages(ecg_signal, timestamps, subj_id, ds_ratio=1, df_snr=pd.DataFrame(),
-                         data_dict=None, hr_plot_type='scatter'):
+                         data_dict=None, hr_plot_type='scatter', hr_markers=None):
     """ Function to plot ecg signal with peaks and HR from multiple stages of analysis and SNR data.
 
         arguments:
@@ -501,17 +535,17 @@ def plot_analysis_stages(ecg_signal, timestamps, subj_id, ds_ratio=1, df_snr=pd.
         -figure
     """
 
-    fig, ax = plt.subplots(3, sharex='col', figsize=(12, 8))
+    fig, ax = plt.subplots(3, sharex='col', figsize=(12, 8), gridspec_kw={'height_ratios': [1, .66, .33]})
     plt.suptitle(f"{subj_id}")
 
     ax[0].plot(timestamps[:len(ecg_signal)][::ds_ratio], ecg_signal[::ds_ratio], color='black', zorder=0)
 
-    offset = 250
+    offset = 500
     for key in data_dict.keys():
         key_data = data_dict[key]
         ax[0].scatter(timestamps[key_data[0][key_data[1]]], ecg_signal[key_data[0][key_data[1]]] + offset * key_data[4],
                       marker=key_data[3], color=key_data[2],
-                      label=f"{key} (n={key_data[0].shape[0]})")
+                      label=f"{key}\n(n={key_data[0].shape[0]})")
 
         if 'hr' in key_data[0].columns and key_data[5]:
             if hr_plot_type == 'scatter':
@@ -519,9 +553,10 @@ def plot_analysis_stages(ecg_signal, timestamps, subj_id, ds_ratio=1, df_snr=pd.
                               color=key_data[2], marker=key_data[3], label=key)
             if hr_plot_type == 'line':
                 ax[1].plot(key_data[0]['start_time'], key_data[0]['hr'],
-                           color=key_data[2], marker=key_data[3], markerfacecolor=key_data[2], label=key)
+                           color=key_data[2], marker=key_data[3] if hr_markers is not None else None,
+                           markerfacecolor=key_data[2], label=key)
 
-    ax[0].legend(loc='lower right')
+    ax[0].legend(fontsize=8, loc='lower right')
     ax[1].legend(loc='lower right')
     ax[1].grid()
     ax[1].set_ylabel("HR")
@@ -534,6 +569,7 @@ def plot_analysis_stages(ecg_signal, timestamps, subj_id, ds_ratio=1, df_snr=pd.
 
     ax[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y/%m/%d\n%H:%M:%S.%f"))
     plt.tight_layout()
+    plt.subplots_adjust(hspace=.04)
 
     return fig
 
@@ -582,8 +618,12 @@ except KeyError:
 # initial peak detection -----------------
 peaks = nk.ecg_peaks(ecg_cleaned=filt, sampling_rate=ecg.fs, method='neurokit', correct_artifacts=False)[1]['ECG_R_Peaks']
 df_peaks1 = pd.DataFrame({'start_time': ecg.ts[peaks], 'idx': peaks, 'height': filt[peaks]})
-df_peaks1['hr'] = calculate_inst_hr(sample_rate=ecg.fs, df_peaks=df_peaks1, peak_colname='idx', min_quality=3, max_break=3)
+correct_cn_peak_locations(df_peaks=df_peaks1, peaks_colname='idx', ecg_signal=filt, sample_rate=ecg.fs, window_size=.3, use_abs_peaks=False)
 
+# removes very low amplitude peaks
+df_peaks1 = df_peaks1.loc[df_peaks1['height'] >= 200]
+df_peaks1.reset_index(drop=True, inplace=True)
+df_peaks1['hr'] = calculate_inst_hr(sample_rate=ecg.fs, df_peaks=df_peaks1, peak_colname='idx', min_quality=3, max_break=3)
 
 # removes peaks during df_snr_ignore and ecg.df_nw periods
 df_peaks2, df_rem2 = remove_peaks_during_bouts(df_peaks=df_peaks1, dfs_events_to_remove=(df_snr_ignore, ecg.df_nw))
@@ -615,41 +655,50 @@ df_peaks3, df_rem3 = run_deltahr_screen(df_peaks=df_peaks2, ecg_signal=filt, sam
 df_peaks4, df_peaks4_ignored = readd_highly_correlated_peaks(df_removed_beats=df_rem3, df_valid=df_peaks3,
                                                              ecg_signal=filt, sample_rate=ecg.fs, timestamps=ecg.ts,
                                                              correl_template=qrs, zncc_thresh=.5, window_size=.25,
-                                                             plot_data=False)
+                                                             min_amp=200, plot_data=False)
 
 # runs this again after peaks were re-added
 df_peaks5, df_rem5 = run_deltahr_screen(df_peaks=df_peaks4, ecg_signal=filt, sample_rate=ecg.fs,
                                         peaks_colname='idx', corr_thresh=.5, correl_window_size=.2,
                                         use_correl_template=True, correl_template=qrs,
-                                        absolute_hr=True, delta_hr_thresh=20, max_iters=5, quiet=False)
+                                        absolute_hr=True, delta_hr_thresh=15, max_iters=5, quiet=False)
 
 df_peaks6, df_rem6 = screen_peak_amplitudes(peaks=df_peaks5['idx'], peak_heights=df_peaks5['height'],
-                                              ecg_signal=filt, sample_rate=ecg.fs, timestamps=ecg.ts,
-                                              correl_window_size=.25, corr_thresh=.7,
-                                              # abs_change=False, change_thresh=100,
-                                              abs_change=True, change_thresh=500,
-                                              use_last_n_beats=3)
+                                            ecg_signal=filt, sample_rate=ecg.fs, timestamps=ecg.ts,
+                                            correl_window_size=.25, corr_thresh=.7,
+                                            abs_change=True, change_thresh=750,
+                                            use_last_n_beats=3)
 
-df_peaks7, df_rem7 = run_deltahr_screen(df_peaks=df_peaks6, ecg_signal=filt, sample_rate=ecg.fs,
+df_peaks7, df_peaks7_ignored = readd_based_on_location(ecg_signal=filt,sample_rate=ecg.fs,
+                                                       df_invalid=df_rem6, df_valid=df_peaks6, margin=.1, amplitude_thresh=500)
+
+df_peaks8, df_rem8 = run_deltahr_screen(df_peaks=df_peaks7, ecg_signal=filt, sample_rate=ecg.fs,
                                         peaks_colname='idx', corr_thresh=.5, correl_window_size=.2,
                                         use_correl_template=True, correl_template=qrs,
-                                        absolute_hr=True, delta_hr_thresh=20, max_iters=5, quiet=False)
+                                        absolute_hr=True, delta_hr_thresh=15, max_iters=5, quiet=False)
 
-# Plotting stages of analysis
+df_epoch = jumping_epoch_hr(sample_rate=ecg.fs, timestamps=ecg.ts[:len(filt)], epoch_len=15, peaks=df_peaks8['idx'])
+
+# Plotting stages of analysis ---------
 fig = plot_analysis_stages(ecg_signal=filt, timestamps=ecg.ts, subj_id=full_id, df_snr=ecg.df_snr,
-                           ds_ratio=1, hr_plot_type='line',
+                           ds_ratio=2, hr_plot_type='line', hr_markers=None,
                            data_dict={
                                       "original": [df_peaks1, 'idx', 'orange', 'v', 1, True],
                                       # 'snr/nw': [df_peaks2, 'idx', 'gold', 'v', 2, False],
                                       # 'snr/nw rem.': [df_rem2, 'idx', 'gold', 'x', 2, False],
-                                      'deltahr1': [df_peaks3, 'idx', 'dodgerblue', 'v', 3, True],
-                                      'deltahr1_rem': [df_rem3, 'idx', 'dodgerblue', 'x', 3, False],
-                                      're-add': [df_peaks4, 'idx', 'limegreen', 'v', 4, True],
-                                      'not re-add': [df_peaks4_ignored, 'idx', 'limegreen', 'x', 4, False],
+                                      #'deltahr1': [df_peaks3, 'idx', 'dodgerblue', 'v', 3, True],
+                                      #'deltahr1_rem': [df_rem3, 'idx', 'dodgerblue', 'x', 3, False],
+                                      're-add_corr': [df_peaks4, 'idx', 'limegreen', 'v', 4, False],
+                                      'not re-add_corr': [df_peaks4_ignored, 'idx', 'limegreen', 'x', 4, False],
                                       'deltahr2': [df_peaks5, 'idx', 'purple', 'v', 5, True],
                                       'deltahr2_rem': [df_rem5, 'idx', 'purple', 'x', 5, False],
-                                      'final': [df_peaks6, 'idx', 'fuchsia', 'v', 6, True],
-                                      'final_rem': [df_rem6, 'idx', 'fuchsia', 'x', 6, False],
-                                      'final2': [df_peaks7, 'idx', 'cyan', 'v', 10, True],
-                                      'final2_readd': [df_rem7, 'idx', 'cyan', 'x', 10, True]
+                                      'peak_amp': [df_peaks6, 'idx', 'fuchsia', 'v', 6, True],
+                                      'peak_amp_rem': [df_rem6, 'idx', 'fuchsia', 'x', 6, False],
+                                      're_add_loc': [df_peaks7, 'idx', 'cyan', 'v', 7, True],
+                                      're_add_loc_ign.': [df_peaks7_ignored, 'idx', 'cyan', 'x', 7, False],
+                                      'deltahr3': [df_peaks8, 'idx', 'green', 'o', 8, True],
+                                      'deltahr3_rem': [df_rem8, 'idx', 'green', 'x', 8, False],
                                       })
+
+# working on readd_location() function
+fig.axes[1].plot(df_epoch['start_time'], df_epoch['hr'], color='black')
