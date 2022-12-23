@@ -1,5 +1,5 @@
 import pandas as pd
-from ECG.ImportFiles import ECG, import_nw_file
+from ECG.ImportFiles import ECG, import_snr_edf, import_nw_file
 from ECG.Processing import remove_peaks_during_bouts, crop_template, find_first_highly_correlated_beat, correct_premature_beat
 from ECG.PeakDetection import correct_cn_peak_locations, create_beat_template_snr_bouts, detect_peaks_initial
 from matplotlib import dates as mdates
@@ -427,16 +427,23 @@ if __name__ == " __main__":
     full_id = 'OND09_SBH0300'
     coll_id = '01'
 
+    # participants with processed data -----
+    # full_ids = ['OND09_0005', 'OND09_0030', 'OND09_0060', 'OND09_0080', 'OND09_0114', 'OND09_0152', 'OND09_0189']
+
+    # Smital SNR thresholds
+    thresholds = (5, 18)
+
     # OND09
     ecg = ECG(edf_folder="W:/NiMBaLWEAR/OND09/wearables/device_edf_cropped/",
               ecg_fname=f"{full_id}_{coll_id}_BF36_Chest.edf",
-              bandpass=(1.5, 25), thresholds=(5, 18),
+              bandpass=(1.5, 25), thresholds=thresholds,
+              # smital_edf_fname=f'W:/NiMBaLWEAR/OND09/analytics/ecg/signal_quality/timeseries_edf/{full_id}_{coll_id}_snr.edf'
               smital_edf_fname="")
 
     # data cropping for faster testing
-    # n_hours = 48
-    # end_idx = int(n_hours*3600*ecg.ecg.signal_headers[ecg.ecg.get_signal_index("ECG")]['sample_rate'])
-    end_idx = len(ecg.ecg.signals[ecg.ecg.get_signal_index("ECG")])
+    n_hours = 48
+    end_idx = int(n_hours*3600*ecg.ecg.signal_headers[ecg.ecg.get_signal_index("ECG")]['sample_rate'])
+    # end_idx = len(ecg.ecg.signals[ecg.ecg.get_signal_index("ECG")])
     ecg_signal = ecg.ecg.signals[0][:end_idx]
     ecg.ecg.filt = ecg.ecg.filt[:end_idx]
     filt = ecg.ecg.filt.copy()
@@ -449,21 +456,56 @@ if __name__ == " __main__":
     except FileNotFoundError:
         ecg.df_nw = pd.DataFrame(columns=['start_timestamp', 'end_timestamp'])
 
+    # signal quality (SNR) data import -----------
+    # bouts appropriate for HR/rhythm analysis
+    ecg.df_snr_hr = import_snr_bout_file(filepath=f"C:/Users/ksweber/Desktop/SNR_dev/Bouts/{full_id}_01_snr_bouts_hr.csv", min_idx=0, max_idx=end_idx)
+
+    # bouts appropriate for full analysis
+    ecg.df_snr_q1 = import_snr_bout_file(filepath=f"C:/Users/ksweber/Desktop/SNR_dev/Bouts/{full_id}_01_snr_bouts_fullanalysis.csv", min_idx=0, max_idx=end_idx)
+    ecg.df_snr_all = import_snr_bout_file(filepath=f"C:/Users/ksweber/Desktop/SNR_dev/Bouts/{full_id}_01_snr_bouts.csv", min_idx=0, max_idx=end_idx)
+
+    # dataframe of lower quality bouts, for use in peak rejection ------
+    try:
+        df_snr_ignore = ecg.df_snr_hr.loc[ecg.df_snr_hr['quality_use'] > 1]
+    except KeyError:
+        ecg.df_snr_hr['quality'] = [int(i) for i in ecg.df_snr_hr['quality']]
+        df_snr_ignore = ecg.df_snr_hr.loc[ecg.df_snr_hr['quality'] > 1]
+
     # initial peak detection -----------------
     df_peaks1 = detect_peaks_initial(ecg_signal=filt, sample_rate=ecg.fs, timestamps=ecg.ts,
                                      correct_locations=True, min_height=None,
                                      correction_windowsize=.3, absolute_peaks=False)
 
+    # creation of average QRS template in 20 highest quality SNR bouts > 60 seconds
+    df_snr_template = ecg.df_snr_q1.loc[(ecg.df_snr_q1['quality_use'] == 1) &
+                                        (ecg.df_snr_q1['duration'] >= 60)].sort_values('avg_snr', ascending=False).reset_index(drop=True)
+
+    qrs, qrs_n, all_beats = create_beat_template_snr_bouts(df_snr=df_snr_template.iloc[0:20],
+                                                           ecg_signal=filt, plot_data=False,
+                                                           sample_rate=ecg.fs, peaks=df_peaks1['idx'],
+                                                           window_size=.75, remove_outlier_amp=True,
+                                                           use_median=False, peak_align=.4, remove_mean=True)
+
+    # crops template to correct length for use downstream and ensures peak is centered
+    qrs_crop = crop_template(template=qrs, sample_rate=ecg.fs, window_size=.2)
+
+    # algorithm call --------------------------------
+
+    start_idx = find_first_highly_correlated_beat(ecg_signal=filt, peaks=df_peaks1['idx'], sample_rate=ecg.fs,
+                                                  template=qrs_crop, window_size=.2, correl_thresh=.75)
+
     data = run_algorithm(ecg_signal=filt, raw_timestamps=ecg.ts, epoch_len=15,
-                         df_peaks=df_peaks1, sample_rate=ecg.fs, start_peak_idx=1,
-                         hq_qrs_template=None, correl_window_size=.2, correl_thresh=.66, correl_method='neighbour',
+                         df_peaks=df_peaks1, sample_rate=ecg.fs, start_peak_idx=start_idx,
+                         hq_qrs_template=qrs_crop, correl_window_size=.2, correl_thresh=.66, correl_method='template',
                          amplitude_thresh=100,  # 250,
                          delta_hr_thresh=15,  # 20
                          location_margin=.1, premature_beat_correl_window_size=.125, premature_search_window=.4,
-                         min_snr_quality=2, df_snr_ignore=pd.DataFrame(), df_nw=ecg.df_nw)
+                         min_snr_quality=2, df_snr_ignore=df_snr_ignore, df_nw=ecg.df_nw)
 
     fig = plot_results(data_dict=data, ecg_signal=filt, ecg_timestamps=ecg.ts, subj=full_id,
-                       peak_cols=('original', 'orph_valid', 'orph_invalid'),
-                       hr_cols=['original', 'orph_epochs'],
-                       orphanidou_bouts=data['orph_bout'].loc[~data['orph_bout']['valid_period']],
+                       peak_cols=('original', 'quality_screen', 'low_quality', 'valid', 'invalid', 'orph_valid', 'orph_invalid'),
+                       hr_cols=['original', 'orph_valid', 'orph_epochs'],
+                       # orphanidou_bouts=data['orph_bout'].loc[~data['orph_bout']['valid_period']],
+                       # smital_quality=ecg.df_snr_hr.loc[ecg.df_snr_hr['quality_use'] == 3],
+                       # smital_raw=ecg.snr,
                        )
