@@ -1,15 +1,32 @@
 import matplotlib.pyplot as plt
 from matplotlib import dates as mdates
+from datetime import timedelta
 import numpy as np
+import pandas as pd
 xfmt = mdates.DateFormatter("%Y/%m/%d\n%H:%M:%S")
 
 
-def plot_corrected_peaks(ecg_signal, timestamps, og_peaks, corr_peaks, ds_ratio):
+def plot_corrected_peaks(ecg_signal: np.array or tuple or list, timestamps: np.array or tuple or list,
+                         original_peaks: np.array or tuple or list, corr_peaks: np.array or tuple or list,
+                         ds_ratio: int = 1):
+    """Plots ECG timeseries data with two sets of marked peaks.
+
+        arguments:
+        -ecg_signal: timeseries ECG signal upon which peak detection was run
+        -timestamps: timestamps of ecg_signal
+        -original_peaks: array-like of first set of peaks
+        -corr_peaks: array-like of second set of peaks
+        -ds_ratio: down sample ratio, int (plots every nth datapoint)
+
+        returns:
+        -figure
+
+    """
 
     fig, ax = plt.subplots(1, figsize=(12, 8))
     ax.plot(timestamps[::ds_ratio], ecg_signal[::ds_ratio], color='black', zorder=0)
 
-    ax.scatter(timestamps[og_peaks], ecg_signal[og_peaks]*1.05,
+    ax.scatter(timestamps[original_peaks], ecg_signal[original_peaks]*1.05,
                s=30, color='red', marker='x', label='Original', zorder=1)
 
     ax.scatter(timestamps[corr_peaks], ecg_signal[corr_peaks],
@@ -23,115 +40,26 @@ def plot_corrected_peaks(ecg_signal, timestamps, og_peaks, corr_peaks, ds_ratio)
     return fig
 
 
-def plot_hr_and_peaks(df_peaks, peaks_colname, df_epoch, timestamps, used_signal, snr_signal, snr_roll,
-                      ecg_obj, raw_signal=(), ds_ratio=3,
-                      show_rr=None, show_jumping=True, thresholds=(5, 20), plot_peaks=True,
-                      start_idx=0, end_idx=-1):
+def compare_hr(data_dict: dict, data_keys: list or tuple = (), overlay=False):
+    """Plots heart rate(s) from specified data either overlaid or on individual subplots.
 
-    fig, ax = plt.subplots(6, figsize=(12, 8), sharex='col', gridspec_kw={"height_ratios": [1, 1, .5, 1, .5, 1]})
+         arguments:
+         -data_dict: dictionary output from run_algorithm()
+         -data_keys: keys in data_dict for which data to plot
+         -overlay: boolean. If True, all data on one subplot. If False, each HR dataset given its own subplot.
 
-    if show_rr is not None:
-        ax[0].plot(df_peaks['timestamp'], df_peaks[show_rr], color='black', label=show_rr)
-    if show_jumping:
-        ax[0].plot(df_epoch['timestamp'], df_epoch['hr'], color='dodgerblue', label='WindowEpoch')
-
-    ax[0].legend()
-    ax[0].set_ylabel("HR")
-    ax[0].set_ylim(0, 250)
-    ax[0].grid()
-
-    if used_signal is not None:
-        ax[1].plot(timestamps[start_idx:end_idx:ds_ratio], used_signal[start_idx:end_idx:ds_ratio],
-                   color='black', zorder=1, label='ECG')
-
-        if plot_peaks:
-            df_peaks = df_peaks.loc[(df_peaks[peaks_colname] >= start_idx) & (df_peaks[peaks_colname] < end_idx)]
-
-            q1 = df_peaks.loc[df_peaks['quality'] == 1]
-            q2 = df_peaks.loc[df_peaks['quality'] == 2]
-            q3 = df_peaks.loc[df_peaks['quality'] == 3]
-            ax[1].scatter(q1['timestamp'], used_signal[q1[peaks_colname]],
-                          color='limegreen', zorder=4, marker='v', label='Q1')
-            ax[1].scatter(q2['timestamp'], used_signal[q2[peaks_colname]],
-                          color='orange', zorder=3, marker='o', label='Q2')
-            ax[1].scatter(q3['timestamp'], used_signal[q3[peaks_colname]],
-                          color='red', zorder=2, marker='x', label='Q3')
-
-    if raw_signal is not None:
-        ax[1].plot(timestamps[start_idx:end_idx:ds_ratio], raw_signal[start_idx:end_idx:ds_ratio],
-                   color='red', zorder=0, label='ECG')
-
-    ax[1].set_ylabel("uV")
-    ax[1].legend(loc='lower left')
-
-    # df_epoch_use = df_epoch.loc[df_epoch['n_invalid'] > 0]
-    # ax[2].scatter(df_epoch_use['timestamp'], df_epoch_use['n_invalid'], s=5, color='red', label='n_invalid beats')
-    ax[2].scatter(df_peaks['timestamp'], df_peaks['r'], color='limegreen', label='QRS_corr')
-    ax[2].set_ylabel("r")
-    ax[2].legend(loc='upper right')
-
-    if snr_signal is not None:
-        ax[3].plot(timestamps[start_idx:end_idx:ds_ratio], snr_signal[start_idx:end_idx:ds_ratio],
-                   color='dodgerblue',  label='SNR', zorder=0)
-    if snr_roll is not None:
-        ax[3].plot(timestamps[start_idx:end_idx:ds_ratio], snr_roll[start_idx:end_idx:ds_ratio],
-                   color='red',  label='SNR_roll', zorder=1)
-
-    ax[3].axhline(thresholds[0], color='red', linestyle='dotted')
-    ax[3].axhline(thresholds[1], color='limegreen', linestyle='dotted')
-    ax[3].legend(loc='upper right')
-    ax[3].set_ylabel("dB")
-
-    if ecg_obj is not None:
-
-        try:
-            c = {1: 'limegreen', 2: 'orange', 3: 'red'}
-            if end_idx == -1:
-                snr_end = ecg_obj.df_snr.iloc[-1]['end_idx']
-            else:
-                snr_end = end_idx
-            for row in ecg_obj.df_snr.loc[(ecg_obj.df_snr['start_idx'] >= start_idx) &
-                                          (ecg_obj.df_snr['end_idx'] <= snr_end)].itertuples():
-                ax[4].plot([row.start_timestamp, row.end_timestamp], [row.quality, row.quality], color=c[row.quality])
-        except AttributeError:
-            pass
-
-        ax[4].set_yticks([1, 2, 3])
-        ax[4].set_yticklabels(['Q1', 'Q2', 'Q3'])
-
-        acc_fs = int(ecg_obj.ecg.signal_headers[ecg_obj.ecg.get_signal_index('Accelerometer x')]['sample_rate'])
-        fs = int(ecg_obj.ecg.signal_headers[ecg_obj.ecg.get_signal_index('ECG')]['sample_rate'])
-
-        t_acc = timestamps[::int(fs/acc_fs)]
-        r = int(fs/acc_fs)
-
-        ax[5].plot(t_acc[int(start_idx/r):int(end_idx/r):ds_ratio],
-                   ecg_obj.ecg.signals[ecg_obj.ecg.get_signal_index('Accelerometer x')][int(start_idx/r):int(end_idx/r):ds_ratio],
-                   color='black', label='X')
-        ax[5].plot(t_acc[int(start_idx/r):int(end_idx/r):ds_ratio],
-                   ecg_obj.ecg.signals[ecg_obj.ecg.get_signal_index('Accelerometer y')][int(start_idx/r):int(end_idx/r):ds_ratio],
-                   color='red', label='Y')
-        ax[5].plot(t_acc[int(start_idx/r):int(end_idx/r):ds_ratio],
-                   ecg_obj.ecg.signals[ecg_obj.ecg.get_signal_index('Accelerometer z')][int(start_idx/r):int(end_idx/r):ds_ratio],
-                   color='dodgerblue', label='Z')
-
-    ax[5].set_ylabel("G")
-    ax[5].legend(loc='lower right')
-    ax[-1].xaxis.set_major_formatter(xfmt)
-
-    plt.tight_layout()
-    plt.subplots_adjust(hspace=.05)
-
-    return fig
-
-
-def compare_hr(data_lists, overlay=False):
+         returns:
+         -figure
+     """
 
     if not overlay:
-        fig, ax = plt.subplots(len(data_lists), sharex='col', sharey='col', figsize=(10, 8))
+        fig, ax = plt.subplots(len(data_keys), sharex='col', sharey='col', figsize=(10, 8))
 
-        for i, data in enumerate(data_lists):
-            ax[i].plot(data[0]['timestamp'], data[0][data[1]], label=data[2], color='black')
+        for i, key in enumerate(data_keys):
+            try:
+                ax[i].plot(data_dict[key]['start_time'], data_dict[key]['hr'], label=key, color='black')
+            except KeyError:
+                pass
 
             ax[i].legend(loc='lower right')
             ax[i].set_ylabel("HR")
@@ -141,94 +69,195 @@ def compare_hr(data_lists, overlay=False):
     if overlay:
         fig, ax = plt.subplots(1, sharex='col', sharey='col', figsize=(10, 8))
 
-        for i, data in enumerate(data_lists):
-            ax.plot(data[0]['timestamp'], data[0][data[1]], label=data[2])
+        for i, key in enumerate(data_keys):
+            ax.plot(data_dict[key]['start_time'], data_dict[key]['hr'], label=key)
 
         ax.legend(loc='lower right')
-        ax.xaxis.set_major_formatter(xfmt)
         ax.set_ylabel("HR")
+        ax.xaxis.set_major_formatter(xfmt)
 
     plt.tight_layout()
 
 
-def overlay_template(qrs_temp, df, ecg_signal, peaks_colname='peak_idx', timestamps=None, ds_ratio=3):
+def overlay_template(ecg_signal: np.array or list or tuple, timestamps: np.array or list or tuple,
+                     qrs_temp: tuple or list or np.array,
+                     df: pd.DataFrame = pd.DataFrame(), peaks_colname: str = 'peak_idx',  ds_ratio: int = 3):
+    """ Overlays average QRS template on top of ECG signal centered on detected peaks.
 
-    # win_size = int(len(qrs_temp)/2)
+        arguments:
+        -qrs_temp: QRS template which is overlaid on peaks. It's scaled to each peak's voltage range.
+        -ecg_signal: timeseries ECG signal
+        -timestamps: timestamps of ecg_signal
+        -ds_ratio: down sample ratio, int. Plots every nth ecg_signal datapoint
+    """
+
+    # Normalizing QRS to have a range of 1uV for scaling
+    qrs_min = min(qrs_temp)
+    qrs_max = max(qrs_temp)
+    qrs_norm = [(i - qrs_min) / (qrs_max - qrs_min) for i in qrs_temp]
+    mean_val = np.mean(qrs_norm)
+    qrs_norm = [i - mean_val for i in qrs_norm]
 
     pre_idx = np.argmax(qrs_temp)
     post_idx = len(qrs_temp) - pre_idx
 
-    start_i = 0
-    end_i = len(ecg_signal)
+    fig, ax = plt.subplots(1, figsize=(12, 8))
+    ax.plot(timestamps[::ds_ratio], ecg_signal[::ds_ratio], color='black', lw=3)
 
-    if 'r' in df.columns:
-        thresh = round(df.loc[~df['valid']]['r'].max(), 2)
+    for peak in df[peaks_colname]:
+        ecg_window = ecg_signal[peak - pre_idx:peak + post_idx]
+        ecg_range = max(ecg_window) - min(ecg_window)
+        ecg_mean = np.mean(ecg_window)
 
-        fig, ax = plt.subplots(2, sharex='col', figsize=(12, 8))
-        ax[0].plot(timestamps[start_i:end_i:ds_ratio], ecg_signal[start_i:end_i:ds_ratio], color='black', lw=2)
+        ax.plot(timestamps[peak - pre_idx:peak + post_idx], [i * ecg_range + ecg_mean for i in qrs_norm], color='red')
 
-        for peak in df[peaks_colname]:
-            ecg_window = ecg_signal[peak - pre_idx:peak + post_idx]
-            ecg_range = max(ecg_window) - min(ecg_window)
-
-            ax[0].plot(timestamps[peak - pre_idx:peak + post_idx], [i * ecg_range for i in qrs_temp], color='red')
-
-        valid = df.loc[df['valid']]
-        invalid = df.loc[~df['valid']]
-
-        ax[1].scatter(valid['timestamp'], valid['r'], color='limegreen', marker='o')
-        ax[1].scatter(invalid['timestamp'], invalid['r'], color='red', marker='x')
-
-        ax[1].axhline(y=thresh, color='red', linestyle='dashed')
-        ax[1].set_ylabel("r")
-        ax[1].grid()
-
-        ax[-1].xaxis.set_major_formatter(xfmt)
-
-    if 'r' not in df.columns:
-        fig, ax = plt.subplots(1, figsize=(12, 8))
-        ax.plot(timestamps[start_i:end_i:ds_ratio], ecg_signal[start_i:end_i:ds_ratio], color='black', lw=2)
-
-        for peak in df[peaks_colname]:
-            ecg_window = ecg_signal[peak - pre_idx:peak + post_idx]
-            ecg_range = max(ecg_window) - min(ecg_window)
-
-            ax.plot(timestamps[peak - pre_idx:peak + post_idx], [i * ecg_range for i in qrs_temp], color='red')
-
-        ax.xaxis.set_major_formatter(xfmt)
+    ax.xaxis.set_major_formatter(xfmt)
 
     plt.tight_layout()
 
     return fig
 
 
-def plot_beat_snr_windowing(signal, timestamps, snr_signal, df_peaks, peaks_colname,
-                            window_size=.33, sample_rate=250, ds_ratio=3):
+def plot_results(data_dict: dict, ecg_signal: np.array or list or tuple, ecg_timestamps: np.array or list or tuple,
+                 subj: str = "", peak_cols: list or tuple = ('original', 'valid'),
+                 hr_cols: list or tuple = ('original', 'valid', 'epoch'),
+                 orphanidou_bouts: pd.DataFrame = None, smital_quality: pd.DataFrame = None,
+                 smital_raw: np.array or list or tuple = None,
+                 df_nw: pd.DataFrame = None, ds_ratio: int = 3):
+    """ Plots output of run_algorithm() function using specified data for heart rate and signal quality indices.
 
-    df_peaks = df_peaks.reset_index(drop=True)
+        arguments:
+        -data_dict: dictionary output from run_algorithm() containing many dataframes
+        -ecg_signal: timeseries ECG signal
+        -ecg_timestamps: timestamps for ecg_signal
+        -subj: str for participant ID
+        -peak_cols: list of keys in data_dict that will be used to plot detected peaks on ecg_signal
+        -hr_cols: list of keys in data_dict that will be used to plot heart rate
+        -orphanidou_bouts: dataframe of Orphanidou signal quality bouts to plot. Recommend only invalid bouts
+        -smital_quality: dataframe of Smital quality bouts to plot.
+        -smital_raw: timeseries Smital SNR data
 
-    fig, ax = plt.subplots(2, sharex='col', figsize=(12, 8))
+        returns:
+        -figure
 
-    ax[0].plot(timestamps[df_peaks.iloc[0]['idx_corr']:df_peaks.iloc[-1]['idx_corr']:ds_ratio],
-               signal[df_peaks.iloc[0]['idx_corr']:df_peaks.iloc[-1]['idx_corr']:ds_ratio], color='black')
+    """
 
-    ax[0].scatter(timestamps[list(df_peaks[peaks_colname])], signal[list(df_peaks[peaks_colname])], color='limegreen', marker='v', s=15)
+    # dictionaries for plotting specifications for all available data
+    color_dict = {"original": 'red', 'quality_screen': 'orange', 'low_quality': 'orange', 'nonwear_screen': 'grey',
+                  'nonwear': 'grey', 'processed': 'mediumorchid',
+                  'valid': 'dodgerblue', 'invalid': 'dodgerblue', 'epoch': 'black',
+                  'orph_valid': 'limegreen', 'orph_invalid': 'limegreen', 'orph_epochs': 'pink'}
+    marker_dict = {"original": 'v', 'quality_screen': 'v', 'low_quality': 'x', 'nonwear_screen': 'v',
+                   'nonwear': 'x', 'processed': 'v',
+                   'valid': 'v', 'invalid': 'x', 'orph_valid': 'v', 'orph_invalid': 'x',
+                   'orph_epochs': None, 'epoch': None}
+    pairs_dict = {'valid': 'invalid', 'invalid': 'valid',
+                  'quality_screen': 'low_quality', 'low_quality': 'quality_screen',
+                  'nonwear': 'nonwear_screen', 'nonwear_screen': 'nonwear',
+                  'orph_valid': 'orph_invalid', 'orph_invalid': 'orph_valid'}
+    plotted = []
 
-    ax[1].plot(timestamps[df_peaks.iloc[0]['idx_corr']:df_peaks.iloc[-1]['idx_corr']:ds_ratio],
-               snr_signal[df_peaks.iloc[0]['idx_corr']:df_peaks.iloc[-1]['idx_corr']:ds_ratio], color='dodgerblue')
+    # subplot formatting based on what data is specified
+    n_subplots = 2
+    heights = [1, .66]
 
-    win_samples = int(window_size * sample_rate)
+    if smital_quality is not None:
+        n_subplots += 1
+        heights.append(.33)
+    if orphanidou_bouts is not None:
+        n_subplots += 1
+        heights.append(.33 if smital_raw is None else .5)
+    if smital_raw is not None and smital_quality is None:
+        n_subplots += 1
+        heights.append(.5)
 
-    for row in df_peaks.itertuples():
-        ax[0].axvspan(xmin=timestamps[row.idx - win_samples], xmax=timestamps[row.idx + win_samples],
-                      ymin=0, ymax=1, color='dimgrey' if row.Index % 2 == 0 else 'lightgrey', alpha=.5)
-        ax[1].axvspan(xmin=timestamps[row.idx - win_samples], xmax=timestamps[row.idx + win_samples],
-                      ymin=0, ymax=1, color='dimgrey' if row.Index % 2 == 0 else 'lightgrey', alpha=.5)
-        m = np.mean(snr_signal[row.idx - win_samples:row.idx + win_samples])
-        ax[1].plot([timestamps[row.idx - win_samples], timestamps[row.idx + win_samples]],
-                   [m, m], lw=2, color='black')
+    fig, ax = plt.subplots(n_subplots, sharex='col', figsize=(12, 8), gridspec_kw={"height_ratios": heights})
 
-    ax[1].legend(labels=['snr', 'avg_snr'])
-    ax[1].set_ylabel("SNR")
-    ax[0].set_ylabel("Voltage")
-    ax[0].set_title(f"SNR Averaging in {window_size}-sec beat windows")
+    plt.suptitle(subj)
+
+    ax[0].plot(ecg_timestamps[:len(ecg_signal):ds_ratio], ecg_signal[::ds_ratio], color='black')
+
+    if df_nw is not None:
+        for row in df_nw.itertuples():
+            if row.Index == 0:
+                ax[0].axvspan(xmin=row.start_time, xmax=row.end_time, ymin=0, ymax=1,
+                              color='grey', alpha=.2, label='nonwear')
+            if row.Index > 0:
+                ax[0].axvspan(xmin=row.start_time, xmax=row.end_time, ymin=0, ymax=1,
+                              color='grey', alpha=.2)
+
+    offset = 0
+    for col in peak_cols:
+
+        has_pair = col in pairs_dict
+        try:
+            pair_plotted = pairs_dict[col] in plotted or col in plotted
+        except KeyError:
+            pair_plotted = False
+
+        if has_pair and not pair_plotted:
+            offset += 200
+
+        if not has_pair:
+            offset += 200
+
+        plotted.append(col)
+
+        ax[0].scatter(data_dict[col]['start_time'], ecg_signal[data_dict[col]['idx']] + offset,
+                      color=color_dict[col], marker=marker_dict[col],
+                      label=f"{col.capitalize()} (n={data_dict[col].shape[0]})")
+
+    ax[0].legend(loc='lower right')
+
+    for col in hr_cols:
+        if col not in ['epoch', 'orphanidou']:
+            ax[1].plot(data_dict[col]['start_time'], data_dict[col]['hr'], color=color_dict[col], label=col.capitalize())
+
+        if col in ['epoch', 'orphanidou']:
+            epoch_len = int((data_dict[col].iloc[1]['start_time'] -
+                             data_dict[col].iloc[0]['start_time']).total_seconds())
+            df_use = data_dict[col].dropna()
+            ax[1].errorbar(df_use['start_time'] + timedelta(seconds=epoch_len/2),
+                           df_use['hr'], label=f'{col.capitalize()} ({epoch_len}s)',
+                           marker=None, ecolor=color_dict[col], fmt='none',
+                           capsize=4, xerr=timedelta(seconds=epoch_len/2)
+                           )
+
+    ax[1].grid()
+    ax[1].legend(loc='lower right')
+    ax[1].set_ylabel("HR")
+
+    if orphanidou_bouts is not None:
+        ax[2].set_ylabel("Orphanidou\nInvalid")
+
+        for row in orphanidou_bouts.itertuples():
+            ax[2].axvspan(xmin=row.start_time, xmax=row.end_time, ymin=0, ymax=1, alpha=.1,
+                          color='red' if not row.valid_period else 'limegreen')
+        ax[2].set_yticks([])
+
+    if smital_quality is not None:
+        use_ax = ax[2] if orphanidou_bouts is None else ax[3]
+
+        c = {"3": 'red', '2': 'dodgerblue', '1': 'limegreen', '0': 'grey'}
+        for row in smital_quality.itertuples():
+            use_ax.axvspan(xmin=row.start_time, xmax=row.end_time, ymin=0, ymax=1, alpha=.1,
+                           color=c[str(row.quality_use)])
+
+        use_ax.set_ylabel("Smital\nQuality")
+
+        if smital_raw is None:
+            use_ax.set_yticks([])
+
+    if smital_raw is not None:
+        if smital_quality is not None:
+            pass
+        if smital_quality is None:
+            use_ax = ax[-1]
+
+        use_ax.plot(ecg_timestamps[:len(smital_raw):25], smital_raw[::25], color='black')
+        use_ax.grid()
+
+    ax[-1].xaxis.set_major_formatter(xfmt)
+    plt.tight_layout()
+
+    return fig

@@ -248,7 +248,6 @@ def create_beat_template_snr_bouts(df_snr, ecg_signal, sample_rate, peaks, remov
             used_peaks_idx.append(j)
 
     med_peak_amp = np.median(ecg_signal[used_peaks_idx])
-    # med_peak_amp = np.median(np.abs(ecg_signal[used_peaks_idx]))
     q3 = np.percentile(ecg_signal[used_peaks_idx], 75)
     q1 = np.percentile(ecg_signal[used_peaks_idx], 25)
     outlier_peak_max = med_peak_amp + 3 * (q3 - q1)
@@ -296,7 +295,7 @@ def create_beat_template_snr_bouts(df_snr, ecg_signal, sample_rate, peaks, remov
         ax[1].grid()
         plt.tight_layout()
 
-    # Normalizing QRS to (0, 1)
+    # Normalizing QRS to have a voltage range of 1
     qrs_min = min(qrs)
     qrs_max = max(qrs)
 
@@ -304,7 +303,9 @@ def create_beat_template_snr_bouts(df_snr, ecg_signal, sample_rate, peaks, remov
     mean_val = np.mean(qrs_norm)
     qrs_norm = [i - mean_val for i in qrs_norm]
 
-    return qrs, qrs_norm, all_beats
+    qrs_crop = crop_template(template=qrs, sample_rate=sample_rate, window_size=.2)
+
+    return qrs, qrs_norm, qrs_crop
 
 
 def screen_peaks_corr(ecg_signal, df_peaks, peaks_colname, qrs_temp, corr_thresh=-1.0, drop_invalid=False):
@@ -424,10 +425,10 @@ def run_zncc_method(input_data, template, min_dist, timestamps, snr, sample_rate
 
 
 def detect_peaks_initial(ecg_signal, sample_rate, timestamps, correct_locations=True, min_height=None,
-                         correction_windowsize=.3, absolute_peaks=False):
+                         correction_windowsize=.3, absolute_peaks=False, neurokit_method='neurokit'):
 
     peaks = nk.ecg_peaks(ecg_cleaned=ecg_signal, sampling_rate=sample_rate,
-                         method='neurokit', correct_artifacts=False)[1]['ECG_R_Peaks']
+                         method=neurokit_method, correct_artifacts=False)[1]['ECG_R_Peaks']
 
     df_peaks = pd.DataFrame({'start_time': timestamps[peaks], 'idx': peaks, 'height': ecg_signal[peaks]})
 

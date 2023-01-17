@@ -10,7 +10,12 @@ from datetime import timedelta
 
 class ECG:
 
-    def __init__(self, edf_folder, ecg_fname, smital_edf_fname="", thresholds=(5, 20), bandpass=(.67, 40)):
+    def __init__(self, edf_folder, ecg_fname,
+                 smital_edf_fname="", thresholds=(5, 20), bandpass=(.67, 40),
+                 snr_hr_bout_filename="",
+                 snr_fullanalysis_bout_filename="",
+                 snr_all_bout_filename="",
+                 nw_filename=""):
 
         self.thresholds = sorted(thresholds)
 
@@ -56,10 +61,20 @@ class ECG:
             self.snr = s.signals[s.get_signal_index('snr')]
 
         if not os.path.exists(smital_edf_fname):
-            self.snr = [0] * len(self.signal)
+            self.snr = [None] * len(self.signal)
 
-        self.df_snr = pd.DataFrame(columns=['start_idx', 'end_idx', 'quality',
-                                            'duration', 'start_timestamp', 'end_timestamp'])
+        # signal quality (SNR) data import -----------
+        self.df_snr_hr = import_snr_bout_file(filepath=snr_hr_bout_filename)
+        self.df_snr_q1 = import_snr_bout_file(filepath=snr_fullanalysis_bout_filename)
+        self.df_snr_all = import_snr_bout_file(filepath=snr_all_bout_filename)
+        self.df_snr_ignore = self.df_snr_hr.loc[self.df_snr_hr['quality_use'] > 1]
+
+        self.df_nw = import_nw_file(filepath=nw_filename, start_timestamp=self.start_stamp, sample_rate=self.fs)
+
+        try:
+            self.df_nw = self.df_nw.loc[self.df_nw['event'] == 'nonwear'].reset_index(drop=True)
+        except KeyError:
+            pass
 
 
 def import_ecg_file(low_f: float = 1.0, high_f: float = 25.0,
@@ -268,6 +283,42 @@ def import_snr_bouts(filepath, sample_rate, snr_signal):
     return df_bouts, quality_totals
 
 
+def import_snr_bout_file(filepath: str):
+    """ Imports signal-to-noise ratio (SNR) bout file from csv and formats column data appropriately.
+
+        arguments:
+        -filepath: pathway to SNR bout file
+
+        returns:
+        -dataframe
+    """
+
+    dtype_cols = {"study_code": str, 'subject_id': str, 'coll_id': str,
+                  'start_idx': pd.Int64Dtype(), 'end_idx': pd.Int64Dtype(), 'bout_num': pd.Int64Dtype(),
+                  'quality': str, 'avg_snr': float, 'quality_use': int}
+
+    df = pd.DataFrame({'study_code': [], 'subject_id': [], 'coll_id': [], 'start_idx': [], 'end_idx': [],
+                       'bout_num': [], 'quality': [], 'avg_snr': [], 'quality_use': []})
+
+    if os.path.exists(filepath):
+        try:
+            date_cols = ['start_time', 'end_time']
+            df = pd.read_csv(filepath, dtype=dtype_cols, parse_dates=date_cols)
+            df['duration'] = [(row.end_time - row.start_time).total_seconds() for row in df.itertuples()]
+
+        except (ValueError, AttributeError):
+            date_cols = ['start_timestamp', 'end_timestamp']
+            df = pd.read_csv(filepath, dtype=dtype_cols, parse_dates=date_cols)
+            df['duration'] = [(row.end_timestamp - row.start_timestamp).total_seconds() for row in df.itertuples()]
+
+        # replaces strings with numeric equivalents for signal qualities
+        df['quality_use'] = df['quality'].replace({'ignore': 3, 'full': 1, 'HR': 1})
+
+        # df = df.loc[(df['start_idx'] >= min_idx) & (df['end_idx'] <= max_idx if max_idx != -1 else df['end_idx'].max())]
+
+    return df
+
+
 def import_snr_edf(filepath):
 
     data = nimbalwear.Device()
@@ -465,16 +516,20 @@ def import_nw_file(filepath: str, sample_rate: float or int, start_timestamp: st
         -dataframe
     """
 
-    start_timestamp = pd.to_datetime(start_timestamp)
-    date_cols = ['start_time', 'end_time']
-    df = pd.read_csv(filepath, parse_dates=date_cols)
+    if os.path.exists(filepath):
+        start_timestamp = pd.to_datetime(start_timestamp)
+        date_cols = ['start_time', 'end_time']
+        df = pd.read_csv(filepath, parse_dates=date_cols)
 
-    if pad_mins != 0:
-        df['start_time'] = [i + timedelta(minutes=-pad_mins) for i in df['start_time']]
-        df['end_time'] = [i + timedelta(minutes=-pad_mins) for i in df['end_time']]
+        if pad_mins != 0:
+            df['start_time'] = [i + timedelta(minutes=-pad_mins) for i in df['start_time']]
+            df['end_time'] = [i + timedelta(minutes=-pad_mins) for i in df['end_time']]
 
-    df['start_idx'] = [int((row.start_time - start_timestamp).total_seconds() * sample_rate) for row in df.itertuples()]
-    df['end_idx'] = [int((row.end_time - start_timestamp).total_seconds() * sample_rate) for row in df.itertuples()]
-    df['duration'] = [(j - i).total_seconds() for i, j in zip(df['start_time'], df['end_time'])]
+        df['start_idx'] = [int((row.start_time - start_timestamp).total_seconds() * sample_rate) for row in df.itertuples()]
+        df['end_idx'] = [int((row.end_time - start_timestamp).total_seconds() * sample_rate) for row in df.itertuples()]
+        df['duration'] = [(j - i).total_seconds() for i, j in zip(df['start_time'], df['end_time'])]
+
+    if not os.path.exists(filepath):
+        df = pd.DataFrame(columns=['start_time', 'end_time'])
 
     return df

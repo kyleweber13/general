@@ -400,11 +400,11 @@ def crop_template(template: np.array or list, sample_rate: int or float, window_
 
 
 def find_first_highly_correlated_beat(ecg_signal: list or np.array, peaks: list or np.array,
-                                      template: list or np.array, window_size: int or float,
+                                      template: list or np.array, correl_window_size: int or float,
                                       sample_rate: int or float, correl_thresh: float = .7):
     """Finds first peak that's highly correlated with template and returns its index"""
 
-    window_samples = int(sample_rate * window_size)
+    window_samples = int(sample_rate * correl_window_size)
 
     for idx, peak in enumerate(peaks):
         window = ecg_signal[peak - window_samples:peak + window_samples]

@@ -434,9 +434,9 @@ if __name__ == " __main__":
               smital_edf_fname="")
 
     # data cropping for faster testing
-    # n_hours = 48
-    # end_idx = int(n_hours*3600*ecg.ecg.signal_headers[ecg.ecg.get_signal_index("ECG")]['sample_rate'])
-    end_idx = len(ecg.ecg.signals[ecg.ecg.get_signal_index("ECG")])
+    n_hours = 48
+    end_idx = int(n_hours*3600*ecg.ecg.signal_headers[ecg.ecg.get_signal_index("ECG")]['sample_rate'])
+    # end_idx = len(ecg.ecg.signals[ecg.ecg.get_signal_index("ECG")])
     ecg_signal = ecg.ecg.signals[0][:end_idx]
     ecg.ecg.filt = ecg.ecg.filt[:end_idx]
     filt = ecg.ecg.filt.copy()
