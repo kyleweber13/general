@@ -4,7 +4,7 @@ from datetime import timedelta as timedelta
 import numpy as np
 import scipy.stats
 import pandas as pd
-from DataReview.Analysis import filter_signal
+from DataReview.Analysis import filter_signal, print_activity_log
 xfmt = mdates.DateFormatter("%a\n%b-%d")
 xfmt_raw = mdates.DateFormatter("%Y-%m-%d\n%H:%M:%S")
 
@@ -12,11 +12,12 @@ xfmt_raw = mdates.DateFormatter("%Y-%m-%d\n%H:%M:%S")
 def summary_plot(df_daily, author, subj, df_sleep):
     author = author.capitalize()
 
-    df = df_daily[["Date", 'Steps', 'MinWalking', 'avm']]
+    df = df_daily[["Date", 'Steps', 'MinWalking', 'avm']].copy()
 
     for col in ["Sed", "Light", "MVPA"]:
-        df[col] = df_daily[f"{col}_{author}"]
-    df = df_daily.iloc[:-1, :]
+        df.loc[:, col] = df_daily[f"{col}_{author}"]
+
+    df = df_daily.copy()
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 8), sharex='all')
     plt.suptitle(f"OND09_{subj}")
@@ -50,8 +51,10 @@ def summary_plot(df_daily, author, subj, df_sleep):
     axes[1][1].bar(df["Date"], df[f'MVPA_{author}'], edgecolor='black', color='orange', label="MVPA", alpha=.75)
     axes[1][1].set_title(f"MVPA Minutes ({author})")
 
-    if axes[1][1].get_ylim()[1] < 30:
-        axes[1][1].set_ylim(0, 30)
+    if axes[1][1].get_ylim()[1] < axes[1][0].get_ylim()[1]:
+        axes[1][1].set_ylim(axes[1][0].get_ylim())
+    if axes[1][1].get_ylim()[1] >= axes[1][0].get_ylim()[1]:
+        axes[1][0].set_ylim(axes[1][1].get_ylim())
 
     axes[1][0].xaxis.set_major_formatter(xfmt)
     axes[1][1].xaxis.set_major_formatter(xfmt)
@@ -61,13 +64,13 @@ def summary_plot(df_daily, author, subj, df_sleep):
     axes[1][2].tick_params(axis='x', labelsize=8)
 
 
-def generate_scatter(df, x, y, label="", color='black', axes=None):
+def generate_scatter(df, x, y, label="", color='black', axes=None, grid=False):
 
     reg = scipy.stats.linregress(x=df[x], y=df[y])
 
     m = reg.slope
     b = reg.intercept
-    r = reg.rvalue
+    r = scipy.stats.pearsonr(df[x], df[y])[0]
     p = reg.pvalue
 
     x_vals = np.linspace(df[x].min(), df[x].max(), 100)
@@ -80,6 +83,8 @@ def generate_scatter(df, x, y, label="", color='black', axes=None):
         ax.set_xlabel(x)
         ax.set_ylabel(y)
         ax.legend()
+        if grid:
+            ax.grid()
 
     if axes is not None:
         axes.scatter(df[x], df[y], color=color)
@@ -88,12 +93,15 @@ def generate_scatter(df, x, y, label="", color='black', axes=None):
         axes.set_ylabel(y)
         axes.legend()
 
+        if grid:
+            axes.grid()
+
 
 def gen_relationship_graph(daily_df, df_gait, author):
 
     author = author.capitalize()
 
-    df = daily_df.iloc[:-1, :]
+    df = daily_df.copy()
 
     plt.figure(figsize=(12, 8))
     ax1 = plt.subplot(2, 3, 1)
@@ -105,18 +113,20 @@ def gen_relationship_graph(daily_df, df_gait, author):
 
     generate_scatter(df, "Steps", f"Active_{author}", axes=ax1)
     generate_scatter(df, "Steps", "MinWalking", axes=ax2)
-    generate_scatter(df, "MinWalking", f"MVPA_{author}", axes=ax3, color='orange')
-    generate_scatter(df, "MinWalking", f"Active_{author}", axes=ax3, color='dodgerblue')
+    generate_scatter(df, "MinWalking", f"MVPA_{author}", label='MVPA', axes=ax3, color='orange')
+    generate_scatter(df, "MinWalking", f"Active_{author}", label='Active', axes=ax3, color='dodgerblue', grid=True)
 
     ax3.plot(np.arange(max([ax3.get_xlim()[1], ax3.get_ylim()[1]])),
              np.arange(max([ax3.get_xlim()[1], ax3.get_ylim()[1]])), color='limegreen')
     generate_scatter(df, "Steps", f"Sed_{author}", axes=ax4)
 
-    c = ['red', 'orange', 'gold', 'green', 'dodgerblue', 'purple', 'pink', 'grey', 'navy', 'black', 'limegreen']
-    ax6.scatter(np.arange(1, df.shape[0]+1), df["MinWalking"]/df[f'Active_{author}'],
-                color=c[:df.shape[0]])
-    ax6.set_ylabel("Mins Walking / Mins Active")
+    ax6.scatter(np.arange(1, df.shape[0]+1), df["MinWalking"]/df[f'Active_{author}'], color='dodgerblue', label='Active')
+    ax6.axhline(np.mean(df["MinWalking"]/df[f'Active_{author}']), color='dodgerblue')
+    ax6.scatter(np.arange(1, df.shape[0]+1), df["MinWalking"]/df[f'MVPA_{author}'], color='orange', label='MVPA')
+    ax6.axhline(np.mean(df["MinWalking"]/df[f'MVPA_{author}']), color='orange')
+    ax6.set_ylabel("Mins Walking / Activity")
     ax6.set_xlabel("Day number")
+    ax6.legend()
     ax6.axhline(y=1, linestyle='dotted', color='limegreen')
 
     df_g = df_gait.loc[df_gait['duration'] >= 10]
@@ -196,7 +206,7 @@ def compare_cutpoints(df_daily):
 
 def plot_raw(ds_ratio=1, dominant=True, author='Powell', subj="", cutpoints=(), alpha=.5,
              df_hr=None, df_posture=None, df_epoch=None, df_sleep_alg=None, df_steps=None, df_gait=None, df_act_log=None,
-             ankle_gyro=True,
+             ankle_gyro=True, intensity_markers=False,
              shade_gait_bouts=False, min_gait_dur=15, mark_steps=False, bout_steps_only=True,
              wrist_gyro=False, highpass_accel=True,
              show_activity_log=False, shade_sleep_windows=False,
@@ -264,19 +274,43 @@ def plot_raw(ds_ratio=1, dominant=True, author='Powell', subj="", cutpoints=(), 
                    'temp': ecg.ecg.get_signal_index("Temperature")}
 
     """ --------- Plot set-up --------"""
-    n_subplots = 7 - sum([int(i is None) for i in [df_epoch, ecg, wrist, ankle, df_hr, df_posture]])
-    fig, ax = plt.subplots(n_subplots, 1, sharex='col', figsize=(12, 8))
+    # n_subplots = 7 - sum([int(i is None) for i in [df_epoch, ecg, wrist, ankle, df_hr, df_posture]])
+    n_subplots = sum([int(i is not None) for i in [df_epoch, ecg, wrist, ankle, df_hr, df_posture]])
+
+    if wrist is not None or ankle is not None:  # for temperature data
+        n_subplots += 1
+
+    if "cadence" in df_epoch.columns:
+        n_subplots += 1
+
+    gs = np.ones(n_subplots)
+
+    fig, ax = plt.subplots(n_subplots, 1, sharex='col', figsize=(12, 8), gridspec_kw={'height_ratios': gs})
 
     plt.suptitle(f"OND09_{subj}")
 
     curr_plot = 0
 
+    already_wrist_nw = False
+    already_ankle_nw = False
+
     """------- Plots activity counts with cutpoints --------"""
     if df_epoch is not None:
         epoch_len = int((df_epoch.iloc[1]['Timestamp'] - df_epoch.iloc[0]['Timestamp']).total_seconds())
-        ax[curr_plot].plot(df_epoch['Timestamp'], df_epoch['avm'], color='black', label=f'{epoch_len}s wrist')
+        ax[curr_plot].plot(df_epoch['Timestamp'], df_epoch['avm'], color='black', label=f'{epoch_len}s wrist', zorder=0)
         ax[curr_plot].set_ylabel("Wrist AVM (mG)")
         ax[curr_plot].axhline(0, color='grey', linestyle='dashed')
+
+        if wrist is None and wrist_nw is not None:
+
+            for row in wrist_nw.itertuples():
+                if row.Index == 0:
+                    ax[curr_plot].axvspan(xmin=row.start_time, xmax=row.end_time, alpha=alpha, linewidth=0,
+                                          color='grey', label='Nonwear')
+                ax[curr_plot].axvspan(xmin=row.start_time, xmax=row.end_time, alpha=alpha, linewidth=0,
+                                      color='grey')
+
+            already_wrist_nw = True
 
         try:
             cp = cutpoints["{}{}".format(author.capitalize(), "Dominant" if dominant else "Non-dominant")]
@@ -289,7 +323,6 @@ def plot_raw(ds_ratio=1, dominant=True, author='Powell', subj="", cutpoints=(), 
 
         if show_activity_log:
 
-            print("\nActivity log key:")
             c = {'yes': 'lightskyblue', 'no': 'pink', 'unknown': 'darkorchid'}
             for row in df_act_log.itertuples():
                 try:
@@ -299,25 +332,29 @@ def plot_raw(ds_ratio=1, dominant=True, author='Powell', subj="", cutpoints=(), 
 
                     ax[curr_plot].axvspan(xmin=row.start_time, xmax=row.start_time + timedelta(minutes=row.duration),
                                           alpha=alpha, linewidth=0, color=c[row.active])
+                    ax[curr_plot].axvline(x=row.start_time, alpha=alpha, linewidth=.75, color=c[row.active])
+                    ax[curr_plot].axvline(x=row.start_time + timedelta(minutes=row.duration),
+                                          alpha=alpha, linewidth=.75, color=c[row.active])
+
                     ax[curr_plot].text(x=row.start_time + timedelta(minutes=row.duration/2),
                                        y=max_val * 1.1 if row.Index % 2 == 0 else max_val * 1.2,
                                        s=row.Index, color='red')
-                    active = {'yes': 'active', 'no': 'inactive', 'unknown': 'unknown'}
-                    print(
-                        f"-#{row.Index} ({active[row.active]}) | {pd.to_datetime(row.start_time).day_name()[:3]}. | "
-                        f"{row.start_time} ({row.duration} mins) - {row.activity}")
 
                 except (TypeError, KeyError):
                     try:
                         ax[curr_plot].axvline(x=row.start_time, color='grey')
                         ax[curr_plot].text(x=row.start_time, y=max_val * 1.1 if row.Index % 2 == 0 else max_val * 1.2,
                                            s=row.Index, color='red')
-                        print(
-                            f"-#{row.Index} ({active[row.active]}) | {pd.to_datetime(row.start_time).day_name()[:3]}. | "
-                            f"{row.start_time} ({row.duration} mins)- {row.activity}")
 
                     except:
                         pass
+
+        if intensity_markers:
+            df_light = df_epoch.loc[df_epoch['intensity'] == 'light']
+            df_mod = df_epoch.loc[df_epoch['intensity'] == 'moderate']
+
+            ax[curr_plot].scatter(df_light['Timestamp'], df_light['avm'], color='limegreen', s=15, label='light', zorder=1)
+            ax[curr_plot].scatter(df_mod['Timestamp'], df_mod['avm'], color='orange', s=15, label='mod', zorder=1)
 
         ax[curr_plot].legend(loc='lower right')
 
@@ -351,7 +388,7 @@ def plot_raw(ds_ratio=1, dominant=True, author='Powell', subj="", cutpoints=(), 
             ax[curr_plot].plot(wrist.ts[::ds_ratio], y[::ds_ratio], color='red')
             ax[curr_plot].plot(wrist.ts[::ds_ratio], z[::ds_ratio], color='dodgerblue')
 
-        if wrist_nw is not None:
+        if wrist_nw is not None and not already_wrist_nw:
 
             for row in wrist_nw.itertuples():
                 if row.Index == 0:
@@ -380,7 +417,7 @@ def plot_raw(ds_ratio=1, dominant=True, author='Powell', subj="", cutpoints=(), 
 
     """--------- Raw ankle data ---------"""
     if ankle is not None:
-        ankle_prefix = "a" if not wrist_gyro else 'g'
+        ankle_prefix = "a" if not ankle_gyro else 'g'
 
         if not highpass_accel:
             ax[curr_plot].plot(ankle.ts[::ds_ratio], ankle.signals[wrist_idx[f'{ankle_prefix}x']][::ds_ratio],
@@ -427,6 +464,8 @@ def plot_raw(ds_ratio=1, dominant=True, author='Powell', subj="", cutpoints=(), 
                 ax[curr_plot].axvspan(xmin=row.start_time, xmax=row.end_time, alpha=alpha, linewidth=0,
                                       color='grey')
 
+            already_ankle_nw = True
+
         if mark_steps and df_steps is not None:
 
             if bout_steps_only and df_gait is not None:
@@ -438,13 +477,37 @@ def plot_raw(ds_ratio=1, dominant=True, author='Powell', subj="", cutpoints=(), 
                                      (df_steps['step_time'] <= bout.end_timestamp)]
                     steps = pd.concat(objs=[steps, s])
 
-                ax[curr_plot].scatter(steps['step_time'], [ankle.signals[ankle_idx['ay']][i] * 1.1 for i in steps['step_idx']],
-                                      marker='v', color='limegreen', label='steps', s=15)
+                ax[curr_plot].scatter(steps['step_time'],
+                                      [ankle.signals[ankle_idx['ay' if not ankle_gyro else 'gz']][i] +
+                                       2 if not ankle_gyro else 200 for i in steps['step_idx']],
+                                      marker='v', color='limegreen', label='steps', s=25, zorder=1)
+
+            if not bout_steps_only:
+
+                ax[curr_plot].scatter(df_steps['step_time'],
+                                      [ankle.signals[ankle_idx['ay' if not ankle_gyro else 'gz']][i] +
+                                       2 if not ankle_gyro else 200 for i in df_steps['step_idx']],
+                                      marker='v', color='limegreen', label='steps', s=25, zorder=1)
 
         if ankle_nw is not None or (df_gait is not None and shade_gait_bouts) or mark_steps:
             ax[curr_plot].legend(loc='lower right')
 
         ax[curr_plot].set_ylabel("Ankle acc (G)" if not ankle_gyro else 'Ankle gyro (deg/sec)')
+
+        curr_plot += 1
+
+    if 'cadence' in df_epoch.columns:
+        ax[curr_plot].plot(df_epoch['Timestamp'], df_epoch['cadence'], color='black')
+        ax[curr_plot].set_ylabel("Epoched Cadence")
+
+        if not already_ankle_nw:
+            for row in ankle_nw.itertuples():
+                if row.Index == 0:
+                    ax[curr_plot].axvspan(xmin=row.start_time, xmax=row.end_time, alpha=alpha, linewidth=0,
+                                          color='grey', label='Nonwear')
+
+                ax[curr_plot].axvspan(xmin=row.start_time, xmax=row.end_time, alpha=alpha, linewidth=0,
+                                      color='grey')
 
         curr_plot += 1
 
@@ -470,15 +533,26 @@ def plot_raw(ds_ratio=1, dominant=True, author='Powell', subj="", cutpoints=(), 
         curr_plot += 1
 
     if df_hr is not None:
-        ax[curr_plot].scatter(df_hr['timestamp'], df_hr['rate'], s=2, color='red')
+        ax[curr_plot].plot(df_hr['timestamp'], df_hr['hr'], color='red')
         ax[curr_plot].set_ylabel("HR (bpm)")
 
-        df_hr = df_hr.loc[[not np.isnan(i) for i in df_hr['rate']]]
-        ax[curr_plot].set_yticks(np.arange(50, 25*np.ceil(max(df_hr['rate'])/25)+1, 25))
+        df_hr = df_hr.loc[[not np.isnan(i) for i in df_hr['hr']]]
+        ax[curr_plot].set_yticks(np.arange(50, 25*np.ceil(max(df_hr['hr'])/25)+1, 25))
         ax[curr_plot].grid()
 
     ax[-1].xaxis.set_major_formatter(xfmt_raw)
     plt.tight_layout()
     plt.subplots_adjust(hspace=.05, top=.955, bottom=.06)
+
+    return fig
+
+
+def plot_gait_histogram(df_gait, col_name='duration', bins=None):
+
+    fig, ax = plt.subplots(1, figsize=(10, 6))
+
+    df_gait[col_name].plot.hist(bins=bins, ax=ax, color='grey', edgecolor='black')
+    ax.set_xlabel(col_name)
+    plt.tight_layout()
 
     return fig
