@@ -143,17 +143,21 @@ def plot_results(data_dict: dict, ecg_signal: np.array or list or tuple, ecg_tim
     """
 
     # dictionaries for plotting specifications for all available data
-    color_dict = {"original": 'red', 'quality_screen': 'orange', 'low_quality': 'orange', 'nonwear_screen': 'grey',
-                  'nonwear': 'grey', 'processed': 'mediumorchid',
-                  'valid': 'dodgerblue', 'invalid': 'dodgerblue', 'epoch': 'black',
+    color_dict = {"original": 'red', 'snr_pass': 'orange', 'snr_fail': 'orange',
+                  'wear': 'grey', 'nonwear': 'grey',
+                  'detailed_check': 'mediumorchid',
+                  'timing_pass': 'dodgerblue', 'timing_fail': 'dodgerblue',
+                  'epoch': 'black',
                   'orph_valid': 'limegreen', 'orph_invalid': 'limegreen', 'orph_epochs': 'pink'}
-    marker_dict = {"original": 'v', 'quality_screen': 'v', 'low_quality': 'x', 'nonwear_screen': 'v',
-                   'nonwear': 'x', 'processed': 'v',
-                   'valid': 'v', 'invalid': 'x', 'orph_valid': 'v', 'orph_invalid': 'x',
+    marker_dict = {"original": 'v', 'snr_pass': 'v', 'snr_fail': 'x',
+                   'wear': 'v', 'nonwear': 'x',
+                   'detailed_check': 'v',
+                   'timing_pass': 'v', 'timing_fail': 'x',
+                   'orph_valid': 'v', 'orph_invalid': 'x',
                    'orph_epochs': None, 'epoch': None}
-    pairs_dict = {'valid': 'invalid', 'invalid': 'valid',
-                  'quality_screen': 'low_quality', 'low_quality': 'quality_screen',
-                  'nonwear': 'nonwear_screen', 'nonwear_screen': 'nonwear',
+    pairs_dict = {'timing_pass': 'timing_fail', 'timing_fail': 'timing_pass',
+                  'snr_pass': 'snr_fail', 'snr_fail': 'snr_pass',
+                  'nonwear': 'wear', 'wear': 'nonwear',
                   'orph_valid': 'orph_invalid', 'orph_invalid': 'orph_valid'}
     plotted = []
 

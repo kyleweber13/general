@@ -15,12 +15,13 @@ class ECG:
                  snr_hr_bout_filename="",
                  snr_fullanalysis_bout_filename="",
                  snr_all_bout_filename="",
-                 nw_filename=""):
+                 nw_filename="",
+                 quiet=True):
 
         self.thresholds = sorted(thresholds)
 
         if os.path.exists(edf_folder + ecg_fname):
-            self.ecg = import_ecg_file(filepath=edf_folder + ecg_fname, low_f=bandpass[0], high_f=bandpass[1])
+            self.ecg = import_ecg_file(filepath=edf_folder + ecg_fname, low_f=bandpass[0], high_f=bandpass[1], quiet=quiet)
 
             self.fs = self.ecg.signal_headers[self.ecg.get_signal_index("ECG")]['sample_rate']
             self.signal = self.ecg.signals[self.ecg.get_signal_index("ECG")]
@@ -57,7 +58,7 @@ class ECG:
 
         if os.path.exists(smital_edf_fname):
             s = nimbalwear.Device()
-            s.import_edf(smital_edf_fname)
+            s.import_edf(smital_edf_fname, quiet=quiet)
             self.snr = s.signals[s.get_signal_index('snr')]
 
         if not os.path.exists(smital_edf_fname):
@@ -77,7 +78,7 @@ class ECG:
             pass
 
 
-def import_ecg_file(low_f: float = 1.0, high_f: float = 25.0,
+def import_ecg_file(low_f: float = 1.0, high_f: float = 25.0, quiet=True,
                     filepath="W:/NiMBaLWEAR/OND09/wearables/device_edf_cropped/OND09_{}_01_BF36_Chest.edf"):
     """Imports Bittium Faros EDF file. Runs _-25Hz BP filter.
 
@@ -89,7 +90,7 @@ def import_ecg_file(low_f: float = 1.0, high_f: float = 25.0,
     """
 
     ecg = nimbalwear.Device()
-    ecg.import_edf(file_path=filepath, quiet=False)
+    ecg.import_edf(file_path=filepath, quiet=quiet)
     ecg.fs = ecg.signal_headers[ecg.get_signal_index("ECG")]['sample_rate']
     try:
         ecg.acc_fs = ecg.signal_headers[ecg.get_signal_index("Accelerometer x")]['sample_rate']

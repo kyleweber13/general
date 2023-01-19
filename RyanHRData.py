@@ -424,45 +424,34 @@ def import_snr_bout_file(filepath: str, min_idx: int = 0, max_idx: int = -1):
 if __name__ == " __main__":
 
     # data import --------------
-    full_id = 'OND09_SBH0300'
-    coll_id = '01'
-
-    # participants with processed data -----
-    # full_ids = ['OND09_0005', 'OND09_0030', 'OND09_0060', 'OND09_0080', 'OND09_0114', 'OND09_0152', 'OND09_0189']
+    full_id = 'OND09_Ryan'
+    coll_id = '02'
 
     # Smital SNR thresholds
     thresholds = (5, 18)
 
     # OND09
-    ecg = ECG(edf_folder="W:/NiMBaLWEAR/OND09/wearables/device_edf_cropped/",
-              ecg_fname=f"{full_id}_{coll_id}_BF36_Chest.edf",
+    ecg = ECG(edf_folder="W:/Ticwatch Test/RYAN_02/", ecg_fname=f"{full_id}_{coll_id}_BF36_Chest.edf",
               bandpass=(1.5, 25), thresholds=thresholds,
-              # smital_edf_fname=f'W:/NiMBaLWEAR/OND09/analytics/ecg/signal_quality/timeseries_edf/{full_id}_{coll_id}_snr.edf'
-              smital_edf_fname="")
+              smital_edf_fname=f'W:/NiMBaLWEAR/OND09/analytics/ecg/signal_quality/timeseries_edf/{full_id}_{coll_id}_snr.edf')
 
     # data cropping for faster testing
-    n_hours = 48
-    end_idx = int(n_hours*3600*ecg.ecg.signal_headers[ecg.ecg.get_signal_index("ECG")]['sample_rate'])
-    # end_idx = len(ecg.ecg.signals[ecg.ecg.get_signal_index("ECG")])
+    end_idx = len(ecg.ecg.signals[ecg.ecg.get_signal_index("ECG")])
     ecg_signal = ecg.ecg.signals[0][:end_idx]
     ecg.ecg.filt = ecg.ecg.filt[:end_idx]
-    filt = ecg.ecg.filt.copy()
+    filt = ecg.ecg.filt.copy() * -1
     ecg.snr = ecg.snr[:end_idx]
 
     # nonwear data import
-    try:
-        ecg.df_nw = import_nw_file(filepath=f"C:/Users/ksweber/Desktop/ECG_nonwear_dev/FinalBouts_SNR/{full_id}_01_BF36_Chest_NONWEAR.csv",
-                                   start_timestamp=ecg.start_stamp, sample_rate=ecg.fs)
-    except FileNotFoundError:
-        ecg.df_nw = pd.DataFrame(columns=['start_timestamp', 'end_timestamp'])
+    ecg.df_nw = pd.DataFrame(columns=['start_timestamp', 'end_timestamp'])
 
     # signal quality (SNR) data import -----------
     # bouts appropriate for HR/rhythm analysis
-    ecg.df_snr_hr = import_snr_bout_file(filepath=f"C:/Users/ksweber/Desktop/SNR_dev/Bouts/{full_id}_01_snr_bouts_hr.csv", min_idx=0, max_idx=end_idx)
+    ecg.df_snr_hr = import_snr_bout_file(filepath=f"W:/Ticwatch Test/RYAN_02/bouts_heartrate/{full_id}_{coll_id}_snr_bouts_heartrate.csv", min_idx=0, max_idx=end_idx)
 
     # bouts appropriate for full analysis
-    ecg.df_snr_q1 = import_snr_bout_file(filepath=f"C:/Users/ksweber/Desktop/SNR_dev/Bouts/{full_id}_01_snr_bouts_fullanalysis.csv", min_idx=0, max_idx=end_idx)
-    ecg.df_snr_all = import_snr_bout_file(filepath=f"C:/Users/ksweber/Desktop/SNR_dev/Bouts/{full_id}_01_snr_bouts.csv", min_idx=0, max_idx=end_idx)
+    ecg.df_snr_q1 = import_snr_bout_file(filepath=f"W:/Ticwatch Test/RYAN_02/bouts_fullanalysis/{full_id}_{coll_id}_snr_bouts_fullanalysis.csv", min_idx=0, max_idx=end_idx)
+    ecg.df_snr_all = import_snr_bout_file(filepath=f"W:/Ticwatch Test/RYAN_02/bouts_original/{full_id}_{coll_id}_snr_bouts.csv", min_idx=0, max_idx=end_idx)
 
     # dataframe of lower quality bouts, for use in peak rejection ------
     try:
@@ -509,3 +498,6 @@ if __name__ == " __main__":
                        # smital_quality=ecg.df_snr_hr.loc[ecg.df_snr_hr['quality_use'] == 3],
                        # smital_raw=ecg.snr,
                        )
+
+    plt.plot(ecg.ts, ecg.signal, color='red')
+    plt.plot(ecg.ts, filt*-1, color='black')

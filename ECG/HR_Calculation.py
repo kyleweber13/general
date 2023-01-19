@@ -329,8 +329,10 @@ def calculate_delta_hr(hr, absolute_hr=True):
     return ch
 
 
-def jumping_epoch_hr(sample_rate, peaks, timestamps, epoch_len=15):
-    print(f"\nEpoching data into {epoch_len}-second windows...")
+def jumping_epoch_hr(sample_rate, peaks, timestamps, epoch_len=15, quiet=True):
+
+    if not quiet:
+        print(f"\nEpoching data into {epoch_len}-second windows...")
 
     epoch_samples = int(sample_rate * epoch_len)
 
@@ -339,7 +341,7 @@ def jumping_epoch_hr(sample_rate, peaks, timestamps, epoch_len=15):
     hrs = []
     beats = []
 
-    for epoch_idx in tqdm(epoch_idxs):
+    for epoch_idx in tqdm(epoch_idxs, colour='limegreen') if not quiet else epoch_idxs:
         epoch_p = sorted(np.where((p >= epoch_idx) & (p < epoch_idx + epoch_samples))[0])
         epoch_p = p[epoch_p]
         n_beats = len(epoch_p)

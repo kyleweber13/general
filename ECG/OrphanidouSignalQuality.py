@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import scipy.stats as stats
 from tqdm import tqdm
+import os
 
 
 class CheckQuality:
@@ -361,35 +362,39 @@ def run_orphanidou(signal, peaks, sample_rate, epoch_len, timestamps, window_siz
               f"{100 * orphanidou.count('valid') / len(orphanidou):.1f}% valid")
 
     df_bout = bout_orphanidou(df_epoch=df_out, timestamps=timestamps)
+    # df_bout = pd.DataFrame()
 
-    return {"quality": df_out, 'valid_peaks': df_valid, 'invalid_peaks': df_invalid, 'bout': df_bout}
+    return {"orph_epochs": df_out, 'orph_valid': df_valid, 'orph_invalid': df_invalid, 'orph_bout': df_bout}
 
 
 def bout_orphanidou(df_epoch, timestamps):
 
     d = df_epoch.copy()
 
-    max_i = d['start_idx'].iloc[-1]
-
-    d['diff'] = d['valid_period'].diff()
+    d['diff'] = d['valid_period'].diff()  # finds when signal changes between valid/invalid
     df_bout = d.loc[d['diff'] != 0]
     df_bout.reset_index(drop=True, inplace=True)
 
     df_bout = df_bout[['start_time', 'start_idx', 'valid_period']]
     df_bout['valid_period'] = [bool(i) for i in df_bout['valid_period']]
 
+    # bout end times/indices
     end_times = list(df_bout['start_time'].iloc[1:])
-    end_times.append(timestamps[max_i])
+    end_times.append(timestamps[-1])
     end_idx = list(df_bout['start_idx'].iloc[1:])
-    df_bout.insert(1, 'end_time', end_times)
-    df_bout.insert(3, 'end_idx', end_idx.append(max_i))
+    end_idx.append(len(timestamps))
 
+    df_bout.insert(1, 'end_time', end_times)
+    df_bout.insert(3, 'end_idx', end_idx)
+
+    # bout durations
     df_bout['duration'] = [(j - i).total_seconds() for i, j in zip(df_bout['start_time'], df_bout['end_time'])]
 
     return df_bout
 
 
 def get_epoch(df, timestamp):
+    """ Given a dataframe with 'start_time' column, returns one row of data that occurs after given timestamp."""
 
     print(f"-Getting epoch that contains {timestamp}")
     t = pd.to_datetime(timestamp)
@@ -399,73 +404,62 @@ def get_epoch(df, timestamp):
     return df_epoch
 
 
-"""
-peaks = df_peaks8['idx']
+def export_orphanidou_dfs(full_id, data_dict, use_keys=None, root_dir=""):
+    """Exports specified Orphanidou output dataframes as .csv
 
-# peaks = all_peaks['neurokit']
-df, output = run_orphanidou(signal=filt, peaks=peaks, timestamps=ecg.ts, window_size=.3,
-                            sample_rate=ecg.fs, epoch_len=15, volt_thresh=250, corr_thresh=.66,
-                            rr_thresh=3, rr_ratio_thresh=3,
-                            quiet=False)
+        arguments:
+        -full_id: str for participant ID
+        -data_dict: dictionary that contains dataframes as objects
+        -use_keys: list of keys in data_dict that get saved as .csv files
+        -root_dir: pathway to output directory
+    """
 
-valid_peaks = []
-for row in df.loc[df['valid_period']].itertuples():
-    valid_peaks += row.peak_idx
+    if use_keys is None:
+        use_keys = list(data_dict.keys())
 
-df_valid = pd.DataFrame({"start_time": ecg.ts[valid_peaks], 'idx': valid_peaks, 'quality': [1] * len(valid_peaks)})
+    print(f"\nSaving {use_keys} data for {full_id}...")
 
-df_valid['hr'] = calculate_inst_hr(sample_rate=ecg.fs, df_peaks=df_valid, peak_colname='idx', min_quality=3, max_break=3)
+    failed_keys = []
 
-from datetime import timedelta
+    for key in tqdm(use_keys):
+        try:
+            data_dict[key].to_csv(f"{root_dir}/{full_id}_{key}.csv", index=False)
+        except KeyError:
+            failed_keys.append(key)
 
-fig, ax = plt.subplots(3, sharex='col', figsize=(12, 8), gridspec_kw={"height_ratios": [1, .5, .33]})
-ax[0].plot(ecg.ts[:len(filt)], filt, color='black', zorder=1)
+    print(f"-Saved dfs {[i for i in use_keys if i not in failed_keys]} to {root_dir}")
 
-ax[0].scatter(ecg.ts[df_peaks1['idx']], filt[df_peaks1['idx']], color='red', marker='o', s=30, zorder=1, label='Orig.')
-ax[0].scatter(ecg.ts[peaks], filt[peaks] + 100, color='orange', marker='v', s=30, zorder=1, label='Screened')
-ax[0].scatter(ecg.ts[peaks], filt[peaks] + 200, color='gold', marker='v', s=30, zorder=1, label='NK')
-ax[0].scatter(ecg.ts[output['r_peaks']], filt[output['r_peaks']] + 300, color='limegreen', s=30, marker='v', zorder=1, label='ValidEpoch')
-ax[0].scatter(ecg.ts[output['removed_rpeaks']], filt[output['removed_rpeaks']] + 300, color='green', marker='x', s=30, zorder=2, label='Edge')
-
-ax[0].scatter(ecg.ts[valid_peaks], filt[valid_peaks] + 400, color='dodgerblue', marker='v', s=30, zorder=2, label='Valid')
-ax[0].axvline(df_epoch['start_time'], color='red')
-
-ax[0].legend(loc='lower right')
-
-ax[1].plot(df_valid['start_time'], df_valid['hr'], color='red', label='B2B', lw=.5)
-ax[1].plot(df['start_time'], df['hr'], color='black', label='Epoch')
-ax[1].legend(loc='lower right')
-ax[1].grid()
-ax[1].set_ylabel("HR (bpm)")
-
-c_dict = {'ignore': 'grey', 'HR': 'limegreen'}
-df_snr_invalid = ecg.df_snr.loc[ecg.df_snr['quality'] == 'ignore']
-df_snr_invalid.reset_index(drop=True, inplace=True)
-for row in df_snr_invalid.itertuples():
-    if row.Index == 0:
-        ax[2].axvspan(xmin=row.start_timestamp, xmax=row.end_timestamp, ymin=0, ymax=1, color=c_dict[row.quality],
-                      alpha=.75, label='SNR')
-    if row.Index > 0:
-        ax[2].axvspan(xmin=row.start_timestamp, xmax=row.end_timestamp, ymin=0, ymax=1, color=c_dict[row.quality], alpha=.25)
-
-df_orph_invalid = df.loc[[not i for i in df['valid_period']]]
-df_orph_invalid.reset_index(drop=True, inplace=True)
-for row in df_orph_invalid.itertuples():
-    if row.Index == 0:
-        ax[2].axvspan(xmin=row.start_time, xmax=row.start_time + timedelta(seconds=15), ymin=0, ymax=1, color='red',
-                      alpha=.75, label='Orphanidou')
-    if row.Index > 0:
-        ax[2].axvspan(xmin=row.start_time, xmax=row.start_time + timedelta(seconds=15), ymin=0, ymax=1, color='red', alpha=.25)
-
-ax[2].errorbar(df['start_time'] + timedelta(seconds=7.5), df['valid_period'],
-               xerr=timedelta(seconds=7.5), color='black', linestyle="", marker='o', label='Orphanidou')
-ax[2].set_yticks([0, 1])
-ax[2].set_yticklabels(['invalid', 'valid'])
-ax[2].legend()
-
-ax[2].xaxis.set_major_formatter(xfmt)
-plt.tight_layout()
+    if len(failed_keys) > 0:
+        print(f"    -Failed to save {failed_keys}")
 
 
-# df_epoch = get_epoch(df, timestamp="2021-11-10 4:16:55")
-"""
+def import_orphanidou_dfs(full_id, root_dir=""):
+    """ Imports all files with the str 'orph' in them in given folder for the specified participant.
+        Attempts to perform some data formatting.
+
+        arguments:
+        -full_id: str for participant ID
+        -root_dir: pathway to folder containing files you wish to import
+
+        returns:
+        -dictionary of dataframes
+    """
+
+    all_files = [i for i in os.listdir(root_dir) if full_id in i and 'orph' in i]
+
+    data = {}
+
+    for file in all_files:
+        key = 'orph_' + file.split("_")[-1].split(".csv")[0]
+        data[key] = pd.read_csv(f"{root_dir}{file}")
+
+        for colname in data[key].columns:
+            if 'time' in colname:
+                data[key][colname] = pd.to_datetime(data[key][colname])
+            if 'idx' in colname:
+                try:
+                    data[key][colname] = data[key][colname].astype('int')
+                except ValueError:
+                    pass
+
+    return data

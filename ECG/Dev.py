@@ -1,13 +1,14 @@
+import nimbalwear
 import pandas as pd
 from ECG.ImportFiles import ECG
 from ECG.Processing import remove_peaks_during_bouts, window_beat
 from ECG.PeakDetection import correct_cn_peak_locations, create_beat_template_snr_bouts, get_zncc
 import matplotlib.pyplot as plt
 from matplotlib import dates as mdates
-xfmt = mdates.DateFormatter("%Y/%m/%d\n%H:%M:%S")
+xfmt = mdates.DateFormatter("%Y/%m/%d\n%H:%M:%S.%f")
 from ECG.Plotting import *
 import neurokit2 as nk
-from ECG.HR_Calculation import calculate_inst_hr
+from ECG.HR_Calculation import calculate_inst_hr, jumping_epoch_hr
 from tqdm import tqdm
 from scipy.stats import pearsonr
 from datetime import timedelta
@@ -25,7 +26,46 @@ def other_methods():
                                         ecg_signal=ecg.filt, sample_rate=ecg.fs, window_size=.3, use_abs_peaks=True)
 
 
-def import_snr_bout_file(filepath: str):
+def compare_peak_detection(ecg_filt, sample_rate, timestamps=None, peak_methods=(), ds_ratio=1, plot_data=True):
+
+    print(f"\nComparing detected peaks from methods:")
+    print(f"-{peak_methods}")
+
+    valid_methods = ['neurokit', 'pantompkins1985', 'hamilton2002', 'zong2003', 'martinez2004', 'christov2004',
+                     'gamboa2004', 'elgendi2010', 'engezeemod2012', 'kalidas2017', 'nabian2018', 'rodrigues2021',
+                     'koka2022', 'promac']
+
+    output_dict = {}
+
+    for peak_method in tqdm(peak_methods):
+        if peak_method in valid_methods:
+            try:
+                p = nk.ecg_peaks(ecg_cleaned=ecg_filt, sampling_rate=sample_rate,
+                                 method=peak_method, correct_artifacts=False)[1]['ECG_R_Peaks']
+                output_dict[peak_method] = p
+            except:
+                print(f"Method '{peak_method}' has failed.")
+        if peak_method not in valid_methods:
+            print(f"Method '{peak_method}' is not valid.")
+
+    fig = None
+    if plot_data:
+        fig, ax = plt.subplots(1, figsize=(12, 8))
+        t = np.arange(0, len(ecg_signal))/sample_rate
+        ax.plot(timestamps[::ds_ratio] if timestamps is not None else t[::ds_ratio], ecg_signal[::ds_ratio],
+                color='black')
+
+        for i, key in enumerate(output_dict.keys()):
+            ax.scatter(timestamps[output_dict[key]] if timestamps is not None else t[output_dict[key]],
+                       ecg_signal[output_dict[key]] + (i * 200), label=f"{key} (n={len(output_dict[key])})")
+
+        ax.legend(loc='lower right')
+        ax.xaxis.set_major_formatter(xfmt)
+
+    return output_dict, fig
+
+
+def import_snr_bout_file(filepath: str, min_idx: int = 0, max_idx: int = -1):
     """ Imports signal-to-noise ratio (SNR) bout file from csv and formats column data appropriately.
 
         arguments:
@@ -45,6 +85,8 @@ def import_snr_bout_file(filepath: str):
 
     # replaces strings with numeric equivalents for signal qualities
     df['quality_use'] = df['quality'].replace({'ignore': 3, 'full': 1, 'HR': 1})
+
+    df = df.loc[(df['start_idx'] >= min_idx) & (df['end_idx'] <= max_idx if max_idx != -1 else df['end_idx'].max())]
 
     return df
 
@@ -148,8 +190,7 @@ def screen_delta_hr(df_peaks: pd.DataFrame, ecg_signal: np.array or list, sample
                 valid_r_next = (r_next >= correl_thresh)
 
             if use_correl_template and correl_template is not None:
-                # r_next = pearsonr(curr_data, correl_template)[0]  # pearson correlation between beats
-                r_next = pearsonr(next_data, correl_template)[0]  ##
+                r_next = pearsonr(next_data, correl_template)[0]
                 valid_r_next = (r_next >= correl_thresh)
 
             # flags next beat for removal if correlation below threshold
@@ -159,7 +200,7 @@ def screen_delta_hr(df_peaks: pd.DataFrame, ecg_signal: np.array or list, sample
                 idx_last = df.loc[valid_idx[-1]]['idx']
                 last_data = ecg_signal[idx_last - beat_window:idx_last + beat_window]
 
-                if not use_correl_template or correl_template is None:  ##
+                if not use_correl_template or correl_template is None:
                     r_last = pearsonr(curr_data, last_data)[0]  # pearson correlation between beats
                 if use_correl_template and correl_template is not None:
                     r_last = pearsonr(next_data, last_data)[0]  # pearson correlation between beats
@@ -170,12 +211,12 @@ def screen_delta_hr(df_peaks: pd.DataFrame, ecg_signal: np.array or list, sample
                     remove_idx.append(idx + 1)
                     r_vals.append(r_next)
 
-                    r_vals_all[idx] = r_next  ##
+                    r_vals_all[idx] = r_next
 
                 if valid_r_last:
                     valid_idx.append(idx)
 
-    df['r'] = r_vals_all  ##
+    df['r'] = r_vals_all
 
     df_out = df.copy().drop(remove_idx)
 
@@ -441,7 +482,6 @@ def screen_peak_amplitudes(peaks, peak_heights, sample_rate, timestamps, ecg_sig
                                        min_quality=3, max_break=3, quiet=True)
 
     df_invalid = df_height.loc[~df_height['valid']]
-    # df_invalid.reset_index(drop=True, inplace=True)
 
     return df_valid, df_invalid
 
@@ -479,34 +519,6 @@ def readd_based_on_location(sample_rate, df_invalid, df_valid, ecg_signal, margi
                                        min_quality=3, max_break=3)
 
     return df_final, df_invalid.loc[[i not in row_idx for i in df_invalid.index]]
-
-
-def jumping_epoch_hr(sample_rate, peaks, timestamps, epoch_len=15):
-    print(f"\nEpoching data into {epoch_len}-second windows...")
-
-    epoch_samples = int(sample_rate * epoch_len)
-
-    p = np.array(peaks)
-    epoch_idxs = range(0, len(timestamps), epoch_samples)
-    hrs = []
-    beats = []
-
-    for epoch_idx in tqdm(epoch_idxs):
-        epoch_p = sorted(np.where((p >= epoch_idx) & (p < epoch_idx + epoch_samples))[0])
-        epoch_p = p[epoch_p]
-        n_beats = len(epoch_p)
-        beats.append(n_beats)
-
-        try:
-            dt = (epoch_p[-1] - epoch_p[0]) / sample_rate
-            hr = (n_beats - 1) / dt * 60
-            hrs.append(round(hr, 1))
-        except (IndexError, ValueError):
-            hrs.append(None)
-
-    df_epoch = pd.DataFrame({"start_time": ecg.ts[epoch_idxs], "idx": epoch_idxs, 'n_beats': beats, 'hr': hrs})
-
-    return df_epoch
 
 
 def plot_analysis_stages(ecg_signal, timestamps, subj_id, ds_ratio=1, df_snr=pd.DataFrame(),
@@ -578,17 +590,17 @@ def plot_analysis_stages(ecg_signal, timestamps, subj_id, ds_ratio=1, df_snr=pd.
 
 # data import --------------
 full_id = 'OND09_0005'
-# full_id = 'OND09_0030'
+# full_ids = ['OND09_0005', 'OND09_0030', 'OND09_0060', 'OND09_0080', 'OND09_0114', 'OND09_0152', 'OND09_0189']
 thresholds = (5, 18)
-
 
 ecg = ECG(edf_folder="W:/NiMBaLWEAR/OND09/wearables/device_edf_cropped/", ecg_fname=f"{full_id}_01_BF36_Chest.edf",
           bandpass=(1.5, 25), thresholds=thresholds)
 
 # data cropping for faster testing
-end_idx = int(24*60*60*ecg.ecg.signal_headers[ecg.ecg.get_signal_index("ECG")]['sample_rate'])
+n_hours = 48
+end_idx = int(n_hours*3600*ecg.ecg.signal_headers[ecg.ecg.get_signal_index("ECG")]['sample_rate'])
 # end_idx = len(ecg.ecg.signals[ecg.ecg.get_signal_index("ECG")])
-ecg.ecg.signals[0] = ecg.ecg.signals[0][:end_idx]
+ecg_signal = ecg.ecg.signals[0][:end_idx]
 ecg.ecg.filt = ecg.ecg.filt[:end_idx]
 filt = ecg.ecg.filt.copy()
 
@@ -598,27 +610,30 @@ ecg.df_nw = import_nw_file(filepath=f"C:/Users/ksweber/Desktop/ECG_nonwear_dev/F
 
 # signal quality (SNR) data import -----------
 # bouts appropriate for HR/rhythm analysis
-ecg.df_snr = import_snr_bout_file(filepath=f"C:/Users/ksweber/Desktop/SNR_dev/Bouts/{full_id}_01_snr_bouts_hr.csv")
-ecg.df_snr = ecg.df_snr.loc[ecg.df_snr['end_idx'] < end_idx]
+ecg.df_snr = import_snr_bout_file(filepath=f"C:/Users/ksweber/Desktop/SNR_dev/Bouts/{full_id}_01_snr_bouts_hr.csv",
+                                  min_idx=0, max_idx=end_idx)
+
+# all_peaks, peak_fig = compare_peak_detection(ecg_filt=filt, sample_rate=ecg.fs, timestamps=ecg.ts[:len(filt)], peak_methods=('neurokit', 'elgendi2010', 'nabian2018', 'rodrigues2021'),ds_ratio=1, plot_data=True)
+all_peaks, peak_fig = compare_peak_detection(ecg_filt=filt, sample_rate=ecg.fs, timestamps=ecg.ts[:len(filt)], peak_methods=['neurokit'], ds_ratio=1, plot_data=False)
 
 # bouts appropriate for full analysis
-ecg.df_snr_q1 = import_snr_bout_file(filepath=f"C:/Users/ksweber/Desktop/SNR_dev/Bouts/{full_id}_01_snr_bouts_fullanalysis.csv")
-ecg.df_snr_q1 = ecg.df_snr_q1.loc[ecg.df_snr_q1['end_idx'] < end_idx]
+ecg.df_snr_q1 = import_snr_bout_file(filepath=f"C:/Users/ksweber/Desktop/SNR_dev/Bouts/{full_id}_01_snr_bouts_fullanalysis.csv",
+                                     min_idx=0, max_idx=end_idx)
 
-ecg.df_snr_all = import_snr_bout_file(filepath=f"C:/Users/ksweber/Desktop/SNR_dev/Bouts/{full_id}_01_snr_bouts.csv")
-ecg.df_snr_all = ecg.df_snr_all.loc[ecg.df_snr_all['end_idx'] < end_idx]
+ecg.df_snr_all = import_snr_bout_file(filepath=f"C:/Users/ksweber/Desktop/SNR_dev/Bouts/{full_id}_01_snr_bouts.csv",
+                                      min_idx=0, max_idx=end_idx)
 
 # dataframe of lower quality bouts, for use in peak rejection ------
 try:
-    df_snr_ignore = ecg.df_snr.loc[ecg.df_snr['quality_use'] > 2]
+    df_snr_ignore = ecg.df_snr.loc[ecg.df_snr['quality_use'] > 1]
 except KeyError:
     ecg.df_snr['quality'] = [int(i) for i in ecg.df_snr['quality']]
-    df_snr_ignore = ecg.df_snr.loc[ecg.df_snr['quality'] > 2]
+    df_snr_ignore = ecg.df_snr.loc[ecg.df_snr['quality'] > 1]
 
 # initial peak detection -----------------
 peaks = nk.ecg_peaks(ecg_cleaned=filt, sampling_rate=ecg.fs, method='neurokit', correct_artifacts=False)[1]['ECG_R_Peaks']
 df_peaks1 = pd.DataFrame({'start_time': ecg.ts[peaks], 'idx': peaks, 'height': filt[peaks]})
-correct_cn_peak_locations(df_peaks=df_peaks1, peaks_colname='idx', ecg_signal=filt, sample_rate=ecg.fs, window_size=.3, use_abs_peaks=False)
+df_peaks1 = correct_cn_peak_locations(df_peaks=df_peaks1, peaks_colname='idx', ecg_signal=filt, sample_rate=ecg.fs, window_size=.3, use_abs_peaks=False)
 
 # removes very low amplitude peaks
 df_peaks1 = df_peaks1.loc[df_peaks1['height'] >= 200]
@@ -651,7 +666,6 @@ df_peaks3, df_rem3 = run_deltahr_screen(df_peaks=df_peaks2, ecg_signal=filt, sam
                                         absolute_hr=True, delta_hr_thresh=20, max_iters=5, quiet=False)
 
 # Re-adds removed peaks that meet correlation criteria/tests for new peaks around removed peaks
-# df_rem3a = df_rem3.loc[df_rem3['start_time'] >= pd.to_datetime('2021-11-09 22:17:43')].iloc[:1]
 df_peaks4, df_peaks4_ignored = readd_highly_correlated_peaks(df_removed_beats=df_rem3, df_valid=df_peaks3,
                                                              ecg_signal=filt, sample_rate=ecg.fs, timestamps=ecg.ts,
                                                              correl_template=qrs, zncc_thresh=.5, window_size=.25,
@@ -669,8 +683,9 @@ df_peaks6, df_rem6 = screen_peak_amplitudes(peaks=df_peaks5['idx'], peak_heights
                                             abs_change=True, change_thresh=750,
                                             use_last_n_beats=3)
 
-df_peaks7, df_peaks7_ignored = readd_based_on_location(ecg_signal=filt,sample_rate=ecg.fs,
-                                                       df_invalid=df_rem6, df_valid=df_peaks6, margin=.1, amplitude_thresh=500)
+df_peaks7, df_peaks7_ignored = readd_based_on_location(ecg_signal=filt, sample_rate=ecg.fs,
+                                                       df_invalid=df_rem6, df_valid=df_peaks6,
+                                                       margin=.1, amplitude_thresh=500)
 
 df_peaks8, df_rem8 = run_deltahr_screen(df_peaks=df_peaks7, ecg_signal=filt, sample_rate=ecg.fs,
                                         peaks_colname='idx', corr_thresh=.5, correl_window_size=.2,
@@ -701,4 +716,5 @@ fig = plot_analysis_stages(ecg_signal=filt, timestamps=ecg.ts, subj_id=full_id, 
                                       })
 
 # working on readd_location() function
-fig.axes[1].plot(df_epoch['start_time'], df_epoch['hr'], color='black')
+fig.axes[1].plot(df_epoch['start_time'], df_epoch['hr'], color='black', linestyle='dotted')
+fig.axes[1].legend()

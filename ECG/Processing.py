@@ -16,7 +16,7 @@ def create_df_peaks(timestamps, peaks):
     return df_out
 
 
-def create_snr_bouts(snr_signal, sample_rate, start_stamp, thresholds=(5, 20), shortest_time=30):
+def create_snr_bouts(snr_signal, sample_rate, start_stamp, thresholds=(5, 20), shortest_time=30, quiet=True):
     """Creates SNR bouts based on given SNR thresholds and duration requirements. Formats into DF.
 
         arguments:
@@ -26,12 +26,14 @@ def create_snr_bouts(snr_signal, sample_rate, start_stamp, thresholds=(5, 20), s
         -thresholds: list/tuple of length 2 for SNR values that differentiate Q3/Q2 and Q2/Q1
             -Thresholds in ascending order
         -shortest_time: shortest duration of a 'bout'
+        -quiet: whether to print processing progress to console
 
         returns:
         -df containing SNR bouts
     """
 
-    print(f"\n-Bouting SNR with thresholds of {thresholds} dB and minimum event durations of {shortest_time}...")
+    if not quiet:
+        print(f"\n-Bouting SNR with thresholds of {thresholds} dB and minimum event durations of {shortest_time}...")
 
     snr_bouts = ecg_quality._annotate_SNR(rolling_snr=snr_signal, signal_len=len(snr_signal), thresholds=thresholds,
                                           sample_rate=sample_rate, shortest_time=shortest_time,
@@ -91,7 +93,8 @@ def create_df_mask(sample_rate, max_i, start_stamp,
     return df_mask, df_gait, df_sleep, df_act, df_nw
 
 
-def calculate_beat_snr(snr_data, sample_rate, df_peaks, peak_colname='idx_corr', thresholds=(5, 20), window_width=.25):
+def calculate_beat_snr(snr_data, sample_rate, df_peaks, peak_colname='idx_corr',
+                       thresholds=(5, 20), window_width=.25, quiet=True):
     """Function that removes peaks whose surrounding window_width-window averages below given SNR threshold.
         Classifies as Q1, Q2, or Q3 data based on thresholds.
 
@@ -102,12 +105,14 @@ def calculate_beat_snr(snr_data, sample_rate, df_peaks, peak_colname='idx_corr',
         -thresholds: snr thresholds
         -window_width: window size around each peak to test
         -drop_invalid: boolean, will remove rows of invalid beats if True
+        -quiet: whether to print processing progress to console
 
         returns:
         -snr values for each beat
     """
 
-    print("\nCalculating mean SNR values for each beat +- {} second{}...".format(window_width, "s" if window_width != 1 else ""))
+    if not quiet:
+        print("\nCalculating mean SNR values for each beat +- {} second{}...".format(window_width, "s" if window_width != 1 else ""))
 
     df_peaks = df_peaks.copy()
 
@@ -166,7 +171,8 @@ def get_zncc(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return (1 / n) * x_std_reciprocal * y_std_reciprocal * (correlation - n * x_mean * y_mean)
 
 
-def filter_rr(df_peaks, sample_rate, timestamps, peaks_colname='idx', threshold=30, max_iters=20, plot_hr=False):
+def filter_rr(df_peaks, sample_rate, timestamps, peaks_colname='idx', threshold=30,
+              max_iters=20, plot_hr=False, quiet=True):
     """Applies 'RR-interval filtering' from Wilkund et al. (2008) to remove potentially artificial R peaks.
 
         '...the series of all RR intervals related to normal-to-normal (N-N) interbeat intervals was filtered using
@@ -182,13 +188,15 @@ def filter_rr(df_peaks, sample_rate, timestamps, peaks_colname='idx', threshold=
         -max_iters: maximum number of iterations to run
         -timestamps: corresponding to peak indexes
         -plot_hr: boolean, plots HR after each iteration
+        -quiet: whether to print processing progress to console
 
         returns:
         -dataframe of remaining beats + timestamps
     """
 
-    print(f"\nRunning Wilkund et al. (2008) RR-filtering technique using a "
-          f"threshold of {threshold}% and <={max_iters} iterations...")
+    if not quiet:
+        print(f"\nRunning Wilkund et al. (2008) RR-filtering technique using a "
+              f"threshold of {threshold}% and <={max_iters} iterations...")
 
     peaks = list(df_peaks[peaks_colname])
 
@@ -199,7 +207,8 @@ def filter_rr(df_peaks, sample_rate, timestamps, peaks_colname='idx', threshold=
 
     for i in range(max_iters):
 
-        print(f"-Iteration {i+1}")
+        if not quiet:
+            print(f"-Iteration {i+1}")
 
         # recalculates RR intervals with remaining peaks (set at end of each iteration after 1st)
         rr = [(j - i) / sample_rate for i, j in zip(peaks[:], peaks[1:])]
@@ -232,11 +241,13 @@ def filter_rr(df_peaks, sample_rate, timestamps, peaks_colname='idx', threshold=
         df_rr = df_rr.loc[df_rr['diff'] <= threshold].reset_index(drop=True)
         n2 = df_rr.shape[0]
 
-        print(f"     -Went from {n1} to {n2} beats ({n1-n2} removed)")
+        if not quiet:
+            print(f"     -Went from {n1} to {n2} beats ({n1-n2} removed)")
 
         if n1-n2 == 0:
-            print(f"     -LOOP BROKEN ON ITERATION {i+1} --> no peaks removed")
-            print(f"          -Total of {n_input - n2} peaks removed ({round((n_input - n2) / n_input, 2)})%")
+            if not quiet:
+                print(f"     -LOOP BROKEN ON ITERATION {i+1} --> no peaks removed")
+                print(f"          -Total of {n_input - n2} peaks removed ({round((n_input - n2) / n_input, 2)})%")
             break
 
         if plot_hr:
@@ -260,12 +271,7 @@ def filter_rr(df_peaks, sample_rate, timestamps, peaks_colname='idx', threshold=
     return df_out.reset_index(drop=True)
 
 
-def full_analysis_method():
-
-    pass
-
-
-def find_snr_bouts(df_snr, min_snr=18, min_duration=60, n_bouts=5, min_total_minutes=20):
+def find_snr_bouts(df_snr, min_snr=18, min_duration=60, n_bouts=5, min_total_minutes=20, quiet=True):
     """Finds bouts in df_snr that meet minimum SNR and minimum duration criteria.
     Returns n_bouts with highest SNR values.
 
@@ -275,12 +281,14 @@ def find_snr_bouts(df_snr, min_snr=18, min_duration=60, n_bouts=5, min_total_min
     -min_duration: minimum duration in seconds for period to be included
     -n_bouts: minimum number of bouts to include
     -min_total_minutes: minimum total duration of bouts to include in minutes
+    -quiet: whether to print processing progress to console
 
     Set n_bouts=-1 to return all bouts
     """
 
-    print(f"\nLocation best (at least) {n_bouts} SNR bouts with a minimum SNR of {min_snr} dB, bout "
-          f"duration of {min_duration} seconds, and totalling > {min_total_minutes} minutes of data...")
+    if not quiet:
+        print(f"\nLocation best (at least) {n_bouts} SNR bouts with a minimum SNR of {min_snr} dB, bout "
+              f"duration of {min_duration} seconds, and totalling > {min_total_minutes} minutes of data...")
 
     df_out = df_snr.loc[(df_snr['avg_snr'] >= min_snr) & (df_snr['duration'] >= min_duration)].reset_index(drop=True)
 
@@ -305,7 +313,7 @@ def find_snr_bouts(df_snr, min_snr=18, min_duration=60, n_bouts=5, min_total_min
     return df_out2
 
 
-def remove_low_quality_signal(ecg_signal, df_snr=None,df_nw=None, min_duration=15, min_quality=2, min_snr=5):
+def remove_low_quality_signal(ecg_signal, df_snr=None,df_nw=None, min_duration=15, min_quality=2, min_snr=5, quiet=True):
 
     if type(ecg_signal) is list:
         signal = np.array(ecg_signal.copy())
@@ -314,8 +322,9 @@ def remove_low_quality_signal(ecg_signal, df_snr=None,df_nw=None, min_duration=1
         signal = np.asarray(np.copy(ecg_signal))
 
     if df_snr is not None:
-        print(f"-Removing ECG data during regions with quality lower than "
-              f"Q{min_quality} and/or SNR < {min_snr} and/or bouts < {min_duration} seconds long...")
+        if not quiet:
+            print(f"-Removing ECG data during regions with quality lower than "
+                  f"Q{min_quality} and/or SNR < {min_snr} and/or bouts < {min_duration} seconds long...")
         df_snr = df_snr.copy()
         df_snr = df_snr.loc[df_snr['end_idx'] < len(signal)].reset_index(drop=True)
 
@@ -328,7 +337,8 @@ def remove_low_quality_signal(ecg_signal, df_snr=None,df_nw=None, min_duration=1
                     signal[row.start_idx:row.end_idx+1] = 0
 
     if df_nw is not None:
-        print("-Flagging non-wear periods...")
+        if not quiet:
+            print("-Flagging non-wear periods...")
         df_nw = df_nw.copy()
         df_nw = df_nw.loc[df_nw['end_idx'] < len(signal)].reset_index(drop=True)
 
@@ -341,7 +351,7 @@ def remove_low_quality_signal(ecg_signal, df_snr=None,df_nw=None, min_duration=1
     return signal
 
 
-def remove_peaks_during_bouts(df_peaks, stage_name="", dfs_events_to_remove=()):
+def remove_peaks_during_bouts(df_peaks, stage_name="", dfs_events_to_remove=(), quiet=True):
     """Removes peaks in df_peaks that occur in any df in df_events_to_remove"""
 
     df_peaks_out = df_peaks.copy()
@@ -350,8 +360,11 @@ def remove_peaks_during_bouts(df_peaks, stage_name="", dfs_events_to_remove=()):
 
     if type(dfs_events_to_remove) is not list and type(dfs_events_to_remove) is not tuple:
         dfs_events_to_remove = [dfs_events_to_remove]
-    print(f"\nRemoving peaks using events from {len(dfs_events_to_remove)} "
-          f"dataframe{'s' if len(dfs_events_to_remove) != 1 else ''} ({stage_name})...")
+
+    if not quiet:
+        print(f"\nRemoving peaks using events from {len(dfs_events_to_remove)} "
+              f"dataframe{'s' if len(dfs_events_to_remove) != 1 else ''} ({stage_name})...")
+
     n = df_peaks.shape[0]  # number of input peaks
 
     # loops through dataframe(s)
@@ -371,7 +384,9 @@ def remove_peaks_during_bouts(df_peaks, stage_name="", dfs_events_to_remove=()):
     df_peaks_rem['stage'] = [stage_name] * df_peaks_rem.shape[0]
 
     n2 = df_peaks_out.shape[0]  # output peaks
-    print(f"-Removed {n - n2}/{n} peaks ({(n-n2)/n*100:.1f}%)")
+
+    if not quiet:
+        print(f"-Removed {n - n2}/{n} peaks ({(n-n2)/n*100:.1f}%)")
 
     return df_peaks_out, df_peaks_rem
 
@@ -392,26 +407,44 @@ def window_beat(ecg_signal, sample_rate, window_size, idx=None, stamp=None, time
 
 def crop_template(template: np.array or list, sample_rate: int or float, window_size: int or float):
     # ensures template length matches specified window size
-    max_i = np.argmax(template)
+    max_i = np.argmax(abs(template))
     pad_i = int(sample_rate * window_size)
-    template = template[int(max_i - pad_i):int(max_i + pad_i)]
+    template = template[int(max_i - pad_i) if int(max_i - pad_i) >= 0 else 0:int(max_i + pad_i)]
 
     return template
 
 
-def find_first_highly_correlated_beat(ecg_signal: list or np.array, peaks: list or np.array,
-                                      template: list or np.array, correl_window_size: int or float,
-                                      sample_rate: int or float, correl_thresh: float = .7):
-    """Finds first peak that's highly correlated with template and returns its index"""
+def find_first_highly_correlated_beat(ecg_signal: list or np.array,
+                                      peaks: list or np.array,
+                                      template: list or np.array,
+                                      correl_thresh: float = .7,
+                                      n_consec: int = 5):
+    """Looks for first peak that matches correlation to template criteria.
+       Requires a streak of n_consec consecutive peaks that meet correlation threshold.
 
-    window_samples = int(sample_rate * correl_window_size)
+        arguments:
+        -ecg_signal: timeseries ECG signal
+        -sample_rate: of ecg_signal, Hz
+        -peaks: array-like of peak indexes corresponding to ecg_signal
+        -template: array-like of average QRS template that windows are each beat are correlated with
+        -correl_thresh: Pearson correlation threshold required for "valid" beat
+        -n_consec: number of consecutive beats above correlation threshold
 
+        returns:
+        -index of first beat in the sequence of n_consecutive beats that exceed correlation threshold
+    """
+
+    window_samples = int(len(template)/2)
+
+    all_r = []
     for idx, peak in enumerate(peaks):
         window = ecg_signal[peak - window_samples:peak + window_samples]
         r = pearsonr(window, template)[0]
+        all_r.append(r >= correl_thresh)
 
-        if r >= correl_thresh:
-            return idx
+        if len(all_r) >= n_consec:
+            if sum(all_r[-n_consec:]) == n_consec:
+                return idx - n_consec
 
 
 def window_signal(ecg_signal: list or np.array, sample_rate: int or float,
@@ -434,10 +467,14 @@ def window_signal(ecg_signal: list or np.array, sample_rate: int or float,
     return window
 
 
-def correct_premature_beat(ecg_signal: list or np.array, sample_rate: int or float,
+def correct_premature_beat(ecg_signal: list or np.array,
+
+                           sample_rate: int or float,
                            peak_idx: int, next_peak_idx: int,
-                           qrs_template: list or np.array, search_window: int or float = .5,
-                           correl_window: int or float = .125, volt_thresh: int or float = 200):
+                           qrs_template: list or np.array,
+                           search_window: int or float = .5,
+                           correl_window: int or float = .125,
+                           volt_thresh: int or float = 200):
     """Function designed to correct prematurely detected beats.
        Scans window specified in search_window *after* the given peak until the next peak,
        runs a simple peak detection, correlates each window with qrs_template.
@@ -451,16 +488,19 @@ def correct_premature_beat(ecg_signal: list or np.array, sample_rate: int or flo
                       window_size=search_window)
 
     w = w[int(len(w)/2):]
+    win_size = int(correl_window * sample_rate)
 
     # simple threshold-based peak detection (not ECG-specific)
-    simple_peaks = indexes(y=w, thres=volt_thresh, thres_abs=True)
+    # simple_peaks = indexes(y=w, thres=volt_thresh, thres_abs=True)
+    simple_peaks = indexes(y=abs(w), thres=volt_thresh, thres_abs=True)
     simple_peaks += peak_idx
     simple_peaks = [i for i in simple_peaks if peak_idx < i < next_peak_idx]
 
     r_vals = []
     for idx, peak in enumerate(simple_peaks):
-        if ecg_signal[peak] >= volt_thresh:
-            window = ecg_signal[peak-int(correl_window*sample_rate):peak+int(correl_window*sample_rate)]
+        # if ecg_signal[peak] >= volt_thresh:
+        if abs(ecg_signal[peak]) >= volt_thresh:
+            window = ecg_signal[peak - win_size:peak + win_size]
             r = pearsonr(qrs_template, window)[0]
             r_vals.append(r)
 
@@ -493,3 +533,15 @@ def row_by_timestamp(df: pd.DataFrame, timestamp: str or pd.Timestamp, n_rows: i
 
     return d
 
+
+def crop_df_snr(df, start_idx=0, end_idx=None, quiet=True):
+
+    if not quiet:
+        print(f"-Cropping Smital SNR dataframe to indexes {start_idx}-{end_idx if end_idx is not None else -1}")
+
+    df = df.loc[df['start_idx'] >= start_idx]
+
+    if end_idx is not None:
+        df = df.loc[df['end_idx'] <= end_idx]
+
+    return df
