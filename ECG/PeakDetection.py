@@ -1,9 +1,14 @@
-from ECG.ImportFiles import *
+import ECG.Processing as Processing
+import ECG.HR_Calculation as HR_Calculation
+import ECG.PeakScreening as PeakScreening
+
 import neurokit2 as nk
-from ECG.HR_Calculation import *
-import scipy.stats
-from tqdm import tqdm
-from ECG.Processing import get_zncc, find_snr_bouts
+import numpy as np
+import pandas as pd
+
+""" ===== CHECKED ===== """
+
+""" ===== NOT CHECKED ===== """
 
 
 def detect_peaks_initial(ecg_signal: np.array or list or tuple,
@@ -13,6 +18,7 @@ def detect_peaks_initial(ecg_signal: np.array or list or tuple,
                          correction_windowsize: float or int = 0.3,
                          min_height: float or int or None = None,
                          absolute_peaks: bool = False,
+                         use_correlation: bool = True,
                          neurokit_method: str = 'neurokit'):
     """ Runs ECG peak detection using specific parameters. Optional peak location correction based on local
         maxima/minima and minimum peak voltage height requirement.
@@ -27,6 +33,8 @@ def detect_peaks_initial(ecg_signal: np.array or list or tuple,
         -correction_windowsize: number of seconds in which the peak location correction function checks on either
                                 side of the input peak
         -absolute_peaks: if True, runs peak location correction using absolute values instead of local maxima
+        -use_correlation: if True, only changes peak location if new peak is more highly-correlated with the previous
+                          peak than the original peak
         -min_height:
         -neurokit_method: peak detection method called by neurkit.ecg_peaks(method)
 
@@ -41,24 +49,40 @@ def detect_peaks_initial(ecg_signal: np.array or list or tuple,
 
     # output df
     df_peaks = pd.DataFrame({'start_time': timestamps[peaks], 'idx': peaks, 'height': ecg_signal[peaks]})
+    df_peaks_corr = None
 
     if correct_locations:
-        df_peaks = correct_peak_locations(df_peaks=df_peaks, peaks_colname='idx', ecg_signal=ecg_signal,
-                                          sample_rate=sample_rate, window_size=correction_windowsize,
-                                          use_abs_peaks=absolute_peaks)
+        df_peaks_corr = PeakScreening.correct_peak_locations(df_peaks=df_peaks,
+                                                             peaks_colname='idx',
+                                                             ecg_signal=ecg_signal,
+                                                             sample_rate=sample_rate,
+                                                             window_size=correction_windowsize,
+                                                             use_abs_peaks=absolute_peaks,
+                                                             use_correlation=use_correlation,
+                                                             timestamps=timestamps)
+
+        df_use = df_peaks_corr
 
     # removes peaks with amplitude < min_height if min_height given, else skips
     if min_height is not None:
-        df_peaks = df_peaks.loc[df_peaks['height'] >= min_height]
+        df_use = df_use.loc[df_use['height'] >= min_height]
 
-    df_peaks.reset_index(drop=True, inplace=True)
+    df_use.reset_index(drop=True, inplace=True)
 
     # calculates beat-to-beat HR on original indexes or corrected indexes
-    df_peaks['hr'] = calculate_inst_hr(sample_rate=sample_rate, df_peaks=df_peaks,
-                                       peak_colname='idx' if not correct_locations else 'idx_corr',
-                                       min_quality=3,  max_break=3)
+    df_peaks['hr'] = HR_Calculation.calculate_inst_hr(sample_rate=sample_rate,
+                                                      df_peaks=df_peaks,
+                                                      peak_colname='idx',
+                                                      min_quality=3,
+                                                      max_break=3)
 
-    return df_peaks
+    df_use['hr'] = HR_Calculation.calculate_inst_hr(sample_rate=sample_rate,
+                                                    df_peaks=df_use,
+                                                    peak_colname='idx' if not correct_locations else 'idx_corr',
+                                                    min_quality=3,
+                                                    max_break=3)
+
+    return df_peaks, df_peaks_corr
 
 
 def create_beat_template_snr_bouts(df_snr: pd.DataFrame,
@@ -70,6 +94,7 @@ def create_beat_template_snr_bouts(df_snr: pd.DataFrame,
                                    remove_mean: bool = True,
                                    use_median: bool = False,
                                    plot_data: bool = False,
+                                   centre_on_absmax_peak: bool = False,
                                    quiet: bool = True):
     """From sections of data specified in df_snr, calculates a 'beat template' of the average heartbeat by
        averaging windows on either side of each given peak.
@@ -193,185 +218,9 @@ def create_beat_template_snr_bouts(df_snr: pd.DataFrame,
     mean_val = np.mean(qrs_norm)
     qrs_norm = [i - mean_val for i in qrs_norm]
 
-    qrs_crop = crop_template(template=qrs, sample_rate=sample_rate, window_size=window_size/2)
+    qrs_crop = Processing.crop_template(template=qrs,
+                                        sample_rate=sample_rate,
+                                        window_size=window_size/2,
+                                        centre_on_absmax_peak=centre_on_absmax_peak)
 
     return qrs, qrs_norm, qrs_crop, all_beats
-
-
-def correct_peak_locations(df_peaks: pd.DataFrame,
-                           peaks_colname: str,
-                           ecg_signal: np.array or list or tuple,
-                           sample_rate: float or int,
-                           window_size: float or int = 0.15,
-                           use_abs_peaks: bool = False,
-                           quiet: bool = True):
-    """Adjusts peak indexes to correspond to highest amplitude value in window surrounding each beat.
-
-        arguments:
-        -df_peaks: dataframe containing peaks, timestamps, etc.
-        -peaks_colname: column name in df_peaks corresponding to peak indexes
-        -ecg_signal: timeseries ECG signal
-        -sample_rate: sample rate of ecg_signal, Hz
-        -window_size: number of seconds included in window on either side of each peak that is checked for
-                      more appropriate peak location
-        -use_abs_peaks: if True, uses absolute values. If False, only looks at positive values for possible peaks.
-        -quiet: whether to print processing progress to console
-
-        returns:
-        -copy of df_peaks with new 'idx_corr' column (correct indexes for peaks)
-    """
-
-    if not quiet:
-        print(f"\nAdjusting peak locations using a window size of +- {window_size} seconds and "
-              f"{'positive' if not use_abs_peaks else 'largest amplitude'} peaks...")
-
-    df_out = df_peaks.copy()
-
-    peaks = []
-
-    # Loops through peaks
-    for peak in list(df_peaks[peaks_colname]):
-
-        # segment of data: peak +- window_size duration
-        window = ecg_signal[int(peak - window_size * sample_rate):int(peak + window_size * sample_rate)]
-
-        # index of largest value/absolute value in the window
-        if use_abs_peaks:
-            p = np.argmax(np.abs(window))
-        if not use_abs_peaks:
-            p = np.argmax(window)
-
-        # converts window's index to whole collection's index
-        peaks.append(p + peak - int(window_size * sample_rate))
-
-    # difference in seconds between peak and corrected peak
-    diff = [(i - j) / sample_rate for i, j in zip(peaks, list(df_peaks[peaks_colname]))]
-
-    df_out['idx_corr'] = peaks
-    df_out['idx_diff'] = diff
-
-    # drops duplicates in case two beats get corrected to the same location (unlikely)
-    df_out.drop_duplicates(subset='idx_corr', keep='first', inplace=True)
-    df_out = df_out.reset_index(drop=True)
-
-    return df_out
-
-
-"""========================================= NOT CHECKED ========================================="""
-
-
-def screen_peaks_corr(ecg_signal, df_peaks, peaks_colname, qrs_temp, corr_thresh=-1.0, drop_invalid=False):
-    """Calculates correlation between QRS template and each beat. Deems peaks as valid/invalid based on
-       given correlation threshold.
-
-        arguments:
-        -ecg_signal: array on which the QRS template was generated
-        -peaks: peak indexes corresponding to ecg_signal
-        -sample_rate: Hz, of ecg_signal
-        -qrs_temp: QRS template array
-        -timestamps: of ecg_signal
-        -window_size: number of seconds that is windowed on each side of each beat in the correlation.
-        -corr_threshold: value between -1 and 1. Peaks with correlation < threshold are deemed invalid.
-            -To not reject any peaks, set to -1
-
-        returns:
-        -df
-    """
-
-    print(f"\nAnalyzing detection peaks using a template correlation threshold of r={corr_thresh}...")
-
-    """ ============= SET-UP ==========="""
-    df_out = df_peaks.copy()
-
-    if len(qrs_temp) % 2 == 1:
-        qrs_temp = np.append(qrs_temp, qrs_temp[-1])
-
-    # win_size = int(len(qrs_temp) / 2)
-    r_vals = []
-    peaks = list(df_peaks[peaks_colname])
-
-    pre_idx = np.argmax(qrs_temp)
-    post_idx = len(qrs_temp) - pre_idx
-
-    """============= LOOPING THROUGH BEATS ========== """
-
-    """ finds first beat that exceeds correlation threshold --> first good beat """
-    for peak in tqdm(peaks):
-
-        # curr_beat = ecg_signal[peak - win_size:peak + win_size]  # window for current beat
-        curr_beat = ecg_signal[peak - pre_idx:peak + post_idx]  # window for current beat
-
-        i = min([len(curr_beat), len(qrs_temp)])
-        r = scipy.stats.pearsonr(curr_beat[:i], qrs_temp[:i])
-        r_vals.append(r[0])
-
-    df_out['r'] = r_vals
-    df_out['valid'] = df_out['r'] > corr_thresh
-
-    # Removes any potential duplicate beats due to something I can't figure out
-    df_out = df_out.drop_duplicates(subset=peaks_colname, keep='first', inplace=False).reset_index(drop=True)
-
-    print(f"\nSUMMARY:")
-    print("-{}/{} beats did not meet correlation threshold of {}".format(df_out['valid'].value_counts()[False],
-                                                                         df_out.shape[0], corr_thresh))
-    print("-{} beats remain ({}% of input beats)".format(df_out['valid'].value_counts()[True],
-                                                         round(df_out['valid'].value_counts()[True]/
-                                                               df_out.shape[0]*100, 1)))
-
-    if drop_invalid:
-        print("Dropping invalid beats.")
-        df_out = df_peaks.loc[df_peaks['valid']].reset_index(drop=True)
-
-    return df_out
-
-
-def run_zncc_method(input_data, template, min_dist, timestamps, snr, sample_rate=250, downsample=2, zncc_thresh=.7,
-                    show_plot=False, thresholds=(5, 20), epoch_len=30, min_quality=2):
-
-    # Runs zero-normalized cross correlation
-    correl = get_zncc(x=template, y=input_data)
-
-    print("\nDetecting peaks in ZNCC signal...")
-    c_peaks = peakutils.indexes(y=correl, thres_abs=True, thres=zncc_thresh, min_dist=min_dist)
-    r = correl[c_peaks]
-
-    print(f"-Found {len(c_peaks)} heartbeats")
-
-    if show_plot:
-        print("\nGenerating plot...")
-
-        fig, axes = plt.subplots(2, sharex='col', figsize=(10, 6))
-
-        axes[0].plot(np.arange(len(input_data))[::downsample] / sample_rate, input_data[::downsample],
-                     color='black', label="Filtered")
-
-        axes[0].legend(loc='lower left')
-        axes[0].set_title("Filtered data with overlayed template on peaks")
-        axes[0].set_ylabel("Voltage")
-
-        x = np.arange(len(template) / 2, len(correl) + len(template) / 2) / 250
-        axes[1].plot(x[::downsample], correl[::downsample], color='dodgerblue', label="ZNCC")
-        axes[1].scatter(x[c_peaks], [correl[i] * 1.1 for i in c_peaks], marker="v", color='red', label="ZNCCPeaks")
-        axes[1].axhline(y=zncc_thresh, color='limegreen', linestyle='dotted', label="ZNCC_Thresh")
-        axes[1].legend(loc='lower left')
-        axes[1].set_ylabel("ZNCC")
-        axes[1].set_xlabel("Seconds")
-
-        plt.tight_layout()
-
-    df_out = pd.DataFrame({"timestamp": timestamps[c_peaks], 'idx': c_peaks, 'r': r})
-
-    df_out = calculate_beat_snr(df_peaks=df_out, peak_colname='idx', snr_data=snr,
-                                thresholds=thresholds, sample_rate=sample_rate, window_width=1)
-
-    """Beat-to-beat HR calculations"""
-    df_out['inst_hr_q1'] = calculate_inst_hr(sample_rate=sample_rate, df_peaks=df_out, max_break=3, min_quality=1)
-    df_out['inst_hr_q2'] = calculate_inst_hr(sample_rate=sample_rate, df_peaks=df_out, max_break=3, min_quality=2)
-    df_out['inst_hr_q3'] = calculate_inst_hr(sample_rate=sample_rate, df_peaks=df_out, max_break=3, min_quality=3)
-
-    """Epoching HR in jumping windows. Excludes peaks below given quality requirement"""
-    df_epoch = calculate_epoch_hr_jumping(df_peaks=df_out, min_quality=min_quality, epoch_len=epoch_len,
-                                          ecg_signal=input_data, ecg_timestamps=timestamps, sample_rate=sample_rate)
-
-    return df_out, df_epoch, correl
-

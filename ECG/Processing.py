@@ -5,11 +5,41 @@ import numpy as np
 import bottleneck
 from peakutils import indexes
 import matplotlib.pyplot as plt
-from ECG.ImportFiles import *
+# from ECG.ImportFiles import *
+import ECG.ImportFiles as ImportFiles
 from scipy.stats import pearsonr
 
+""" ===== CHECKED ===== """
 
-def create_df_peaks(timestamps, peaks):
+
+def crop_df(df: pd.DataFrame(), start_idx: int = 0, end_idx: None or int = None, quiet: bool = True):
+    """Crops dataframe to given start/stop indexes.
+
+        arguments:
+        -dataframe: df to be cropped. Must contain columns 'start_idx' and/or 'end_idx'.
+        -start_idx/end_idx: values used to crop. If end_idx is None, will only crop using start_idx
+        -quiet: boolean for printing to console
+
+        returns:
+        -cropped dataframe
+    """
+
+    if not quiet:
+        print(f"-Cropping dataframe to indexes {start_idx}-{end_idx if end_idx is not None else -1}")
+
+    df_out = df.copy()
+    df_out = df_out.loc[df_out['start_idx'] >= start_idx]
+
+    if end_idx is not None:
+        df_out = df_out.loc[df_out['end_idx'] <= end_idx]
+
+    return df_out
+
+
+""" ===== NOT CHECKED ===== """
+
+
+def create_df_peaks(timestamps: np.array or list or tuple, peaks: np.array or list or tuple):
 
     df_out = pd.DataFrame({'start_time': timestamps[peaks], 'idx': peaks, 'valid': [True] * len(peaks)})
 
@@ -69,19 +99,24 @@ def create_df_mask(sample_rate, max_i, start_stamp,
        returns individual DFs and unified gait mask DF
     """
 
-    df_gait, gait_mask = import_gait_bouts(gait_folder=gait_folder,
-                                           gait_file=gait_file,
-                                           sample_rate=sample_rate, max_i=max_i, start_stamp=start_stamp)
-    df_sleep, sleep_mask = import_sleep_bouts(sleep_folder=sleep_folder,
-                                              sleep_file=sleep_file,
-                                              sample_rate=sample_rate, max_i=max_i, start_stamp=start_stamp)
-    df_act, act_mask = import_activity_counts(activity_folder=activity_folder,
-                                              activity_file=activity_file,
-                                              sample_rate=sample_rate, max_i=max_i, start_stamp=start_stamp)
+    df_gait, gait_mask = ImportFiles.import_gait_bouts(gait_folder=gait_folder,
+                                                       gait_file=gait_file,
+                                                       sample_rate=sample_rate, max_i=max_i,
+                                                       start_stamp=start_stamp)
+
+    df_sleep, sleep_mask = ImportFiles.import_sleep_bouts(sleep_folder=sleep_folder,
+                                                          sleep_file=sleep_file,
+                                                          sample_rate=sample_rate, max_i=max_i,
+                                                          start_stamp=start_stamp)
+
+    df_act, act_mask = ImportFiles.import_activity_counts(activity_folder=activity_folder,
+                                                          activity_file=activity_file,
+                                                          sample_rate=sample_rate, max_i=max_i,
+                                                          start_stamp=start_stamp)
 
     max_len = int(np.floor(max_i / sample_rate))
-    df_nw, nw_mask = import_nonwear_data(file=nw_folder + nw_file, start_stamp=start_stamp,
-                                         sample_rate=sample_rate, max_i=max_i, full_id=full_id)
+    df_nw, nw_mask = ImportFiles.import_nonwear_data(file=nw_folder + nw_file, start_stamp=start_stamp,
+                                                     sample_rate=sample_rate, max_i=max_i, full_id=full_id)
 
     df_mask = pd.DataFrame({"seconds": np.arange(max_len),
                             'timestamp': pd.date_range(start=start_stamp, periods=len(gait_mask), freq='1S'),
@@ -141,7 +176,7 @@ def calculate_beat_snr(snr_data, sample_rate, df_peaks, peak_colname='idx_corr',
     return df_peaks
 
 
-def get_zncc(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+def get_zncc(x: np.ndarray, y: np.ndarray):
     """
     Get zero-normalized cross-correlation (ZNCC) of the given vectors.
     Adapted from: https://en.wikipedia.org/wiki/Cross-correlation#Zero-normalized_cross-correlation_(ZNCC)
@@ -149,7 +184,6 @@ def get_zncc(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         1 / (n * std(x) * std(y)) * (sum[x(i) * y(i)] - n * mean(x) * mean(y))
     """
 
-    # TODO: also return whether peak meets statistical significance criteria.
     # TODO: return array of lags.
     # Ensure x is the longer signal.
     x, y = sorted((x, y), key=len, reverse=True)
@@ -168,6 +202,7 @@ def get_zncc(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
     # Calculate correlation and normalize.
     correlation = np.correlate(x, y, mode="valid")
+
     return (1 / n) * x_std_reciprocal * y_std_reciprocal * (correlation - n * x_mean * y_mean)
 
 
@@ -351,46 +386,6 @@ def remove_low_quality_signal(ecg_signal, df_snr=None,df_nw=None, min_duration=1
     return signal
 
 
-def remove_peaks_during_bouts(df_peaks, stage_name="", dfs_events_to_remove=(), quiet=True):
-    """Removes peaks in df_peaks that occur in any df in df_events_to_remove"""
-
-    df_peaks_out = df_peaks.copy()
-
-    df_peaks_rem = pd.DataFrame(columns=df_peaks_out.columns)
-
-    if type(dfs_events_to_remove) is not list and type(dfs_events_to_remove) is not tuple:
-        dfs_events_to_remove = [dfs_events_to_remove]
-
-    if not quiet:
-        print(f"\nRemoving peaks using events from {len(dfs_events_to_remove)} "
-              f"dataframe{'s' if len(dfs_events_to_remove) != 1 else ''} ({stage_name})...")
-
-    n = df_peaks.shape[0]  # number of input peaks
-
-    # loops through dataframe(s)
-    for df in dfs_events_to_remove:
-        # loops through rows in dataframe
-        for row in df.itertuples():
-            df_peaks_out = df_peaks_out.loc[(df_peaks_out['idx'] < row.start_idx) | (df_peaks_out['idx'] > row.end_idx)]
-
-            df_rem = df_peaks.loc[(df_peaks['idx'] >= row.start_idx) & (df_peaks['idx'] <= row.end_idx)]
-            df_peaks_rem = pd.concat([df_peaks_rem, df_rem])
-
-    df_peaks_out.reset_index(drop=True, inplace=True)
-
-    df_peaks_rem.drop_duplicates(inplace=True)
-    df_peaks_rem.reset_index(drop=True, inplace=True)
-    df_peaks_rem['idx'] = df_peaks_rem['idx'].astype(int)
-    df_peaks_rem['stage'] = [stage_name] * df_peaks_rem.shape[0]
-
-    n2 = df_peaks_out.shape[0]  # output peaks
-
-    if not quiet:
-        print(f"-Removed {n - n2}/{n} peaks ({(n-n2)/n*100:.1f}%)")
-
-    return df_peaks_out, df_peaks_rem
-
-
 def window_beat(ecg_signal, sample_rate, window_size, idx=None, stamp=None, timestamps=None):
 
     ws = int(sample_rate * window_size)
@@ -403,15 +398,6 @@ def window_beat(ecg_signal, sample_rate, window_size, idx=None, stamp=None, time
     w = ecg_signal[idx - ws:idx + ws]
 
     return w
-
-
-def crop_template(template: np.array or list, sample_rate: int or float, window_size: int or float):
-    # ensures template length matches specified window size
-    max_i = np.argmax(abs(template))
-    pad_i = int(sample_rate * window_size)
-    template = template[int(max_i - pad_i) if int(max_i - pad_i) >= 0 else 0:int(max_i + pad_i)]
-
-    return template
 
 
 def find_first_highly_correlated_beat(ecg_signal: list or np.array,
@@ -438,13 +424,16 @@ def find_first_highly_correlated_beat(ecg_signal: list or np.array,
 
     all_r = []
     for idx, peak in enumerate(peaks):
-        window = ecg_signal[peak - window_samples:peak + window_samples]
-        r = pearsonr(window, template)[0]
-        all_r.append(r >= correl_thresh)
+        if peak - window_samples >= 0 and peak + window_samples < len(ecg_signal):
+            window = ecg_signal[peak - window_samples:peak + window_samples]
+            r = pearsonr(window, template)[0]
+            all_r.append(r >= correl_thresh)
 
-        if len(all_r) >= n_consec:
-            if sum(all_r[-n_consec:]) == n_consec:
-                return idx - n_consec
+            if len(all_r) >= n_consec:
+                if sum(all_r[-n_consec:]) == n_consec:
+                    return idx - n_consec
+
+    print("Failed to find a beat.")
 
 
 def window_signal(ecg_signal: list or np.array, sample_rate: int or float,
@@ -468,53 +457,65 @@ def window_signal(ecg_signal: list or np.array, sample_rate: int or float,
 
 
 def correct_premature_beat(ecg_signal: list or np.array,
-
                            sample_rate: int or float,
-                           peak_idx: int, next_peak_idx: int,
+                           peak_idx: int,
+                           next_peak_idx: int,
                            qrs_template: list or np.array,
                            search_window: int or float = .5,
                            correl_window: int or float = .125,
-                           volt_thresh: int or float = 200):
+                           volt_thresh: int or float = 200,
+                           use_abs_value: bool = False,
+                           correl_thresh: int or float = .7):
     """Function designed to correct prematurely detected beats.
        Scans window specified in search_window *after* the given peak until the next peak,
        runs a simple peak detection, correlates each window with qrs_template.
        Of the beats with an amplitude above volt_thresh, returns index of the beat with the highest correlation value.
 
-
     """
 
     w = window_signal(ecg_signal=ecg_signal, sample_rate=sample_rate,
-                      centre_idx=peak_idx,
-                      window_size=search_window)
+                      centre_idx=peak_idx, window_size=search_window)
 
+    # current beat's correlation with template
+    w_crop = w[int(len(w)/2 - len(qrs_template)/2):int(len(w)/2 + len(qrs_template)/2)]
+    curr_r = pearsonr(w_crop, qrs_template)[0]
+
+    # since checking for mature beat, looking only to correct to a beat *after* the tested peak
     w = w[int(len(w)/2):]
+
+    # samples in window
     win_size = int(correl_window * sample_rate)
 
-    # simple threshold-based peak detection (not ECG-specific)
-    # simple_peaks = indexes(y=w, thres=volt_thresh, thres_abs=True)
-    simple_peaks = indexes(y=abs(w), thres=volt_thresh, thres_abs=True)
+    # simple threshold-based peak detection (not ECG-specific) in window after tested beat
+    simple_peaks = indexes(y=abs(w) if use_abs_value else w, thres=volt_thresh, thres_abs=True)
     simple_peaks += peak_idx
     simple_peaks = [i for i in simple_peaks if peak_idx < i < next_peak_idx]
 
     r_vals = []
+    # for peaks with amplitude above threshold, tests correlation to template
     for idx, peak in enumerate(simple_peaks):
-        # if ecg_signal[peak] >= volt_thresh:
         if abs(ecg_signal[peak]) >= volt_thresh:
             window = ecg_signal[peak - win_size:peak + win_size]
             r = pearsonr(qrs_template, window)[0]
-            r_vals.append(r)
+            r_vals.append(round(r, 3))
 
     try:
-        max_r = np.argmax(r_vals)
+        max_r_idx = np.argmax(r_vals)
         max_r_val = max(r_vals)
-        max_r_peak = simple_peaks[max_r]
+        max_r_peak = simple_peaks[max_r_idx]
+
+        # only uses new peak if it's more highly-correlated than original tested peak
+        """if curr_r >= max_r_val:
+            max_r_val = curr_r
+            max_r_peak = peak_idx
+        """
 
     # if no alternative peaks, returns original peak
     except ValueError:
         max_r_val = None
         max_r_peak = peak_idx
 
-    return max_r_peak, max_r_val, simple_peaks
+    return [max_r_peak, max_r_val, r_vals, simple_peaks]
 
 
 def row_by_timestamp(df: pd.DataFrame, timestamp: str or pd.Timestamp, n_rows: int = 1):
@@ -533,15 +534,3 @@ def row_by_timestamp(df: pd.DataFrame, timestamp: str or pd.Timestamp, n_rows: i
 
     return d
 
-
-def crop_df_snr(df, start_idx=0, end_idx=None, quiet=True):
-
-    if not quiet:
-        print(f"-Cropping Smital SNR dataframe to indexes {start_idx}-{end_idx if end_idx is not None else -1}")
-
-    df = df.loc[df['start_idx'] >= start_idx]
-
-    if end_idx is not None:
-        df = df.loc[df['end_idx'] <= end_idx]
-
-    return df

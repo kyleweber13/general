@@ -5,6 +5,86 @@ from tqdm import tqdm
 from datetime import timedelta
 
 
+""" ===== CHECKED ===== """
+
+
+def calculate_inst_hr(df_peaks: pd.DataFrame(),
+                      sample_rate: int or float,
+                      peak_colname: str = 'idx',
+                      min_quality: int = 3,
+                      max_break: int = 3,
+                      quiet: bool = True):
+    """Calculates beat-to-beat HR from given peaks (RR intervals)
+
+        arguments:
+        -df_peaks: df with timestamps, indexes, and a validity check column
+        -min_quality: worst quality data to include. Integer of 1, 2, or 3 (3 is lowest quality). If df_peaks
+                      does not contain a column 'quality', all peaks will be used
+        -sample_rate: Hz, of ecg signal
+        -max_break: number of seconds consecutive beats can be and still calculate a HR. If RR interval is above this
+            value, a None will be given instead of a very low HR
+        -quiet: boolean to print status to console
+
+        returns:
+        -list of heart rates corresponding to peaks in df_peaks
+    """
+
+    if not quiet:
+        print(f"\nCalculating beat-to-beat HR using beats in Smital category <={min_quality} "
+              f"and maximum gap between beats of {max_break} seconds...")
+
+    inst_hr = []
+    peaks = list(df_peaks[peak_colname])
+
+    if 'quality' in df_peaks.columns:
+        q = list(df_peaks['quality'])
+    if 'quality' not in df_peaks.columns:
+        q = [1] * df_peaks.shape[0]
+        if not quiet:
+            print("-No quality data provided. All beats will be included.")
+
+    for i in range(df_peaks.shape[0] - 1):
+        p1 = peaks[i]
+        p2 = peaks[i+1]
+
+        dt = (p2 - p1) / sample_rate
+
+        if dt <= max_break and q[i] <= min_quality and q[i+1] <= min_quality:
+            inst_hr.append(round(60 / dt, 2))
+
+        else:
+            inst_hr.append(None)
+
+    inst_hr.append(None)
+
+    return inst_hr
+
+
+def calculate_delta_hr(hr, absolute_hr=True):
+    """Calculates beat-to-beat change in HR.
+
+        arguments:
+        -hr: list of beat-to-beat HRs
+        -absolute_hr: if True, uses absolute value of HR
+
+        returns:
+        -list of delta heart rates
+    """
+
+    # delta HR. Values are beat and change from previous beat
+    if absolute_hr:
+        ch = [j - i for i, j in zip(hr[:], hr[1:])]
+    if not absolute_hr:
+        ch = [(j - i) * 100 / i for i, j in zip(hr[:], hr[1:])]
+
+    ch.insert(0, None)  # padding since lose one element using zip()
+
+    return ch
+
+
+""" ===== NOT CHECKED ===== """
+
+
 def epoch_hr(df_beats, avg_period, start_time, end_time, centre=False):
 
     # window timestamps
@@ -133,52 +213,6 @@ def filter_rr(df_peaks, sample_rate, timestamps, peaks_colname='idx', threshold=
     df_out['rr'] = [(j - i) / sample_rate for i, j in zip(peaks[:], peaks[1:])]
 
     return df_out.reset_index(drop=True)
-
-
-def calculate_inst_hr(sample_rate, df_peaks, peak_colname='idx', min_quality=3, max_break=3, quiet=True):
-    """Calculates beat-to-beat HR from given peaks (RR intervals)
-
-        arguments:
-        -df_peaks: df with timestamps, indexes, and a validity check column
-        -min_quality: worst quality data to include. Integer of 1, 2, or 3 (3 is lowest quality)
-        -sample_rate: Hz, of ecg signal
-        -max_break: number of seconds consecutive beats can be and still calculate a HR. If RR interval is above this
-            value, a None will be given instead of a very low HR
-
-        returns:
-        -heart rates
-
-    """
-
-    if not quiet:
-        print(f"\nCalculating beat-to-beat HR using beats in Smital category <={min_quality} "
-              f"and maximum gap between beats of {max_break} seconds...")
-
-    inst_hr = []
-    peaks = list(df_peaks[peak_colname])
-
-    if 'quality' in df_peaks.columns:
-        q = list(df_peaks['quality'])
-    if 'quality' not in df_peaks.columns:
-        q = [1] * df_peaks.shape[0]
-        if not quiet:
-            print("-No quality data provided. All beats will be included.")
-
-    for i in range(df_peaks.shape[0] - 1):
-        p1 = peaks[i]
-        p2 = peaks[i+1]
-
-        dt = (p2 - p1) / sample_rate
-
-        if dt <= max_break and q[i] <= min_quality and q[i+1] <= min_quality:
-            inst_hr.append(round(60 / dt, 2))
-
-        else:
-            inst_hr.append(None)
-
-    inst_hr.append(None)
-
-    return inst_hr
 
 
 def calculate_epoch_hr_sliding(df_peaks, sample_rate, epoch_len=15):
@@ -314,19 +348,6 @@ def calculate_epoch_hr_jumping(df_peaks, sample_rate, ecg_signal, ecg_timestamps
                        'duration': durations, 'hr': epoch_hr})
 
     return df
-
-
-def calculate_delta_hr(hr, absolute_hr=True):
-
-    # delta HR. Values are beat and change from previous beat
-    if absolute_hr:
-        ch = [j - i for i, j in zip(hr[:], hr[1:])]
-    if not absolute_hr:
-        ch = [(j - i) * 100 / i for i, j in zip(hr[:], hr[1:])]
-
-    ch.insert(0, None)  # padding
-
-    return ch
 
 
 def jumping_epoch_hr(sample_rate, peaks, timestamps, epoch_len=15, quiet=True):

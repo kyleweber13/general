@@ -1,11 +1,12 @@
 import nimbalwear
-import pickle
 import os
 import Filtering
-import pandas as pd
 from ECG.Processing import *
 import numpy as np
 from datetime import timedelta
+
+
+""" ===== CHECKED ===== """
 
 
 class ECG:
@@ -78,9 +79,11 @@ class ECG:
             pass
 
 
-def import_ecg_file(low_f: float = 1.0, high_f: float = 25.0, quiet=True,
-                    filepath="W:/NiMBaLWEAR/OND09/wearables/device_edf_cropped/OND09_{}_01_BF36_Chest.edf"):
-    """Imports Bittium Faros EDF file. Runs _-25Hz BP filter.
+def import_ecg_file(filepath="W:/NiMBaLWEAR/OND09/wearables/device_edf_cropped/OND09_{}_01_BF36_Chest.edf",
+                    low_f: float = 1.0,
+                    high_f: float = 25.0,
+                    quiet=True):
+    """Imports Bittium Faros EDF file. Runs bandpass filter.
 
        argument:
        -subj: str for which subject's data to import
@@ -97,11 +100,117 @@ def import_ecg_file(low_f: float = 1.0, high_f: float = 25.0, quiet=True,
     except TypeError:
         ecg.acc_fs = ecg.signal_headers[ecg.get_signal_index("Accelerometer_X")]['sample_rate']
 
-    print(f"-Running {low_f}-{high_f}Hz bandpass filter...")
+    if not quiet:
+        print(f"-Running {low_f}-{high_f}Hz bandpass filter...")
+
     ecg.filt = Filtering.filter_signal(data=ecg.signals[ecg.get_signal_index("ECG")], sample_f=ecg.fs,
                                        low_f=low_f, high_f=high_f, filter_order=5, filter_type='bandpass')
 
     return ecg
+
+
+def import_snr_bout_file(filepath: str):
+    """ Imports signal-to-noise ratio (SNR) bout file from csv and formats column data appropriately.
+
+        arguments:
+        -filepath: pathway to SNR bout file
+
+        returns:
+        -dataframe
+    """
+
+    dtype_cols = {"study_code": str, 'subject_id': str, 'coll_id': str,
+                  'start_idx': pd.Int64Dtype(), 'end_idx': pd.Int64Dtype(), 'bout_num': pd.Int64Dtype(),
+                  'quality': str, 'avg_snr': float, 'quality_use': int}
+
+    df = pd.DataFrame({'study_code': [], 'subject_id': [], 'coll_id': [], 'start_idx': [], 'end_idx': [],
+                       'bout_num': [], 'quality': [], 'avg_snr': [], 'quality_use': []})
+
+    if os.path.exists(filepath):
+        try:
+            date_cols = ['start_time', 'end_time']
+            df = pd.read_csv(filepath, dtype=dtype_cols, parse_dates=date_cols)
+            df['duration'] = [(row.end_time - row.start_time).total_seconds() for row in df.itertuples()]
+
+        except (ValueError, AttributeError):
+            date_cols = ['start_timestamp', 'end_timestamp']
+            df = pd.read_csv(filepath, dtype=dtype_cols, parse_dates=date_cols)
+            df['duration'] = [(row.end_timestamp - row.start_timestamp).total_seconds() for row in df.itertuples()]
+
+        # replaces strings with numeric equivalents for signal qualities
+        df['quality_use'] = df['quality'].replace({'ignore': 3, 'full': 1, 'HR': 1})
+
+    return df
+
+
+def import_nw_file(filepath: str, sample_rate: float or int, start_timestamp: str, pad_mins: int or float = 0):
+    """ Imports and formats nonwear bouts csv file.
+
+        arguments:
+        -filepath: pathway to csv file
+        -sample_rate: of ECG signal, Hz
+        -start_timestamp: of ECG signal
+        -pad_mins: numbers of minutes added to start/end of each nonwear bout
+
+        returns:
+        -dataframe
+    """
+
+    df = pd.DataFrame(columns=['start_time', 'end_time'])
+
+    if os.path.exists(filepath):
+        start_timestamp = pd.to_datetime(start_timestamp)
+        date_cols = ['start_time', 'end_time']
+        df = pd.read_csv(filepath, parse_dates=date_cols)
+
+        if pad_mins != 0:
+            df['start_time'] = [i + timedelta(minutes=-pad_mins) for i in df['start_time']]
+            df['end_time'] = [i + timedelta(minutes=-pad_mins) for i in df['end_time']]
+
+        df['start_idx'] = [int((row.start_time - start_timestamp).total_seconds() * sample_rate) for
+                           row in df.itertuples()]
+
+        df['end_idx'] = [int((row.end_time - start_timestamp).total_seconds() * sample_rate) for
+                         row in df.itertuples()]
+
+        df['duration'] = [(j - i).total_seconds() for i, j in zip(df['start_time'], df['end_time'])]
+
+    return df
+
+
+def import_orphanidou_dfs(full_id: str, root_dir: str):
+    """ Imports all files with the str 'orph' in them in given folder for the specified participant.
+        Attempts to perform some data formatting.
+
+        arguments:
+        -full_id: str for participant ID
+        -root_dir: pathway to folder containing files you wish to import
+
+        returns:
+        -dictionary of dataframes
+    """
+
+    all_files = [i for i in os.listdir(root_dir) if full_id in i and 'orph' in i]
+
+    data = {}
+
+    for file in all_files:
+        key = 'orph_' + file.split("_")[-1].split(".csv")[0]
+        data[key] = pd.read_csv(f"{root_dir}{file}")
+
+        for colname in data[key].columns:
+            if 'time' in colname:
+                data[key][colname] = pd.to_datetime(data[key][colname])
+            if 'idx' in colname:
+                try:
+                    data[key][colname] = data[key][colname].astype('int')
+                except ValueError:
+                    pass
+
+    return data
+
+
+""" ===== NOT CHECKED ===== """
 
 
 def import_cn_file(sample_rate, pathway, ecg_signal=None, use_arrs=None, start_time=None, quiet=True, timestamp_method='start',
@@ -237,7 +346,7 @@ def import_cn_beats_file(pathway, start_stamp, sample_rate):
         return df_rr
 
 
-def import_snr_bouts(filepath, sample_rate, snr_signal):
+def import_snr_bouts(filepath: str, sample_rate: int or float, snr_signal: np.array or list or tuple):
     """Imports Excel file of processed SNR bouts. Calculates min, average, and max voltage values during each event.
        Calculates what percent of file falls into each SNR category.
 
@@ -282,42 +391,6 @@ def import_snr_bouts(filepath, sample_rate, snr_signal):
         print(f"     -Q{row.Index}: {row.percent:.1f}% of data")
 
     return df_bouts, quality_totals
-
-
-def import_snr_bout_file(filepath: str):
-    """ Imports signal-to-noise ratio (SNR) bout file from csv and formats column data appropriately.
-
-        arguments:
-        -filepath: pathway to SNR bout file
-
-        returns:
-        -dataframe
-    """
-
-    dtype_cols = {"study_code": str, 'subject_id': str, 'coll_id': str,
-                  'start_idx': pd.Int64Dtype(), 'end_idx': pd.Int64Dtype(), 'bout_num': pd.Int64Dtype(),
-                  'quality': str, 'avg_snr': float, 'quality_use': int}
-
-    df = pd.DataFrame({'study_code': [], 'subject_id': [], 'coll_id': [], 'start_idx': [], 'end_idx': [],
-                       'bout_num': [], 'quality': [], 'avg_snr': [], 'quality_use': []})
-
-    if os.path.exists(filepath):
-        try:
-            date_cols = ['start_time', 'end_time']
-            df = pd.read_csv(filepath, dtype=dtype_cols, parse_dates=date_cols)
-            df['duration'] = [(row.end_time - row.start_time).total_seconds() for row in df.itertuples()]
-
-        except (ValueError, AttributeError):
-            date_cols = ['start_timestamp', 'end_timestamp']
-            df = pd.read_csv(filepath, dtype=dtype_cols, parse_dates=date_cols)
-            df['duration'] = [(row.end_timestamp - row.start_timestamp).total_seconds() for row in df.itertuples()]
-
-        # replaces strings with numeric equivalents for signal qualities
-        df['quality_use'] = df['quality'].replace({'ignore': 3, 'full': 1, 'HR': 1})
-
-        # df = df.loc[(df['start_idx'] >= min_idx) & (df['end_idx'] <= max_idx if max_idx != -1 else df['end_idx'].max())]
-
-    return df
 
 
 def import_snr_edf(filepath):
@@ -502,35 +575,3 @@ def import_cn_beat_file(filename, start_time, sample_rate=250):
     heart_beats = heart_beats[["timestamp", 'idx', 'rate', 'PP', 'QRS', 'PQ', 'QRn', 'QT', 'NOISE']]
 
     return heart_beats
-
-
-def import_nw_file(filepath: str, sample_rate: float or int, start_timestamp: str, pad_mins: int or float = 0):
-    """ Imports and formats nonwear bouts csv file.
-
-        arguments:
-        -filepath: pathway to csv file
-        -sample_rate: of ECG signal, Hz
-        -start_timestamp: of ECG signal
-        -pad_mins: numbers of minutes added to start/end of each nonwear bout
-
-        returns:
-        -dataframe
-    """
-
-    if os.path.exists(filepath):
-        start_timestamp = pd.to_datetime(start_timestamp)
-        date_cols = ['start_time', 'end_time']
-        df = pd.read_csv(filepath, parse_dates=date_cols)
-
-        if pad_mins != 0:
-            df['start_time'] = [i + timedelta(minutes=-pad_mins) for i in df['start_time']]
-            df['end_time'] = [i + timedelta(minutes=-pad_mins) for i in df['end_time']]
-
-        df['start_idx'] = [int((row.start_time - start_timestamp).total_seconds() * sample_rate) for row in df.itertuples()]
-        df['end_idx'] = [int((row.end_time - start_timestamp).total_seconds() * sample_rate) for row in df.itertuples()]
-        df['duration'] = [(j - i).total_seconds() for i, j in zip(df['start_time'], df['end_time'])]
-
-    if not os.path.exists(filepath):
-        df = pd.DataFrame(columns=['start_time', 'end_time'])
-
-    return df
