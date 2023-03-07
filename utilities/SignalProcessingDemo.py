@@ -121,7 +121,6 @@ class FilterTest:
             filtered_data = filtfilt(b, a, x=self.raw_data)
 
         self.filtered_data = filtered_data
-
         self.filtered_fft = scipy.fft.fft(filtered_data)
 
     def plot_data(self):
@@ -374,11 +373,11 @@ class STFTTest:
         return fig, f, t, Zxx
 
 
-sample_filter = FilterTest(freqs=[.5, 5, 10], filter_type="bandpass", low_f=.1, high_f=8, filter_order=5, n_seconds=2, plot_data=True)
+sample_filter = FilterTest(freqs=[1], filter_type="bandpass", low_f=.1, high_f=8, filter_order=5, n_seconds=2, plot_data=True)
 
 # frequencies and signal duration linked to FilterTest class instance
-sample_rate = SampleRateTest(freqs=sample_filter.freqs, n_seconds=sample_filter.n_seconds, sample_f=10, show_plot=True)
+# sample_rate = SampleRateTest(freqs=sample_filter.freqs, n_seconds=sample_filter.n_seconds, sample_f=10, show_plot=True)
 
-sample_stft = STFTTest(freqs=(.5, 5, 10), n_seconds=10)
-fig, f, t, Zxx = sample_stft.plot_stft(nperseg_multiplier=5, plot_data=True, ylim=(0, 12))
+# sample_stft = STFTTest(freqs=(.5, 5, 10), n_seconds=10)
+# fig, f, t, Zxx = sample_stft.plot_stft(nperseg_multiplier=5, plot_data=True, ylim=(0, 12))
 
