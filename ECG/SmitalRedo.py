@@ -75,8 +75,8 @@ def flag_rr_windows(r_peaks, quiet=True):
 
     windows = [[0, int(np.mean([r_peaks[0], r_peaks[1]]))]]
     for p1, p2, p3 in zip(r_peaks[:], r_peaks[1:], r_peaks[2:]):
-        rr_pre = p2 - int((p2 - p1) / 2)
-        rr_post = p2 + int((p3 - p2) / 2)
+        rr_pre = p2 - int(np.ceil((p2 - p1) / 2))  ##
+        rr_post = p2 + int(np.floor((p3 - p2) / 2))  ##
 
         windows.append([rr_pre, rr_post])
 
@@ -149,16 +149,18 @@ def H(ymn, windows, pad_left=0, tm=2.8, apply_threshold=True):
     if apply_threshold:
         # threshold calculation -------------
         threshes = []
+
         for decomp_level in range(n_levels):
             thresh_level = np.zeros(pad_left)
             coef = np.abs(coefs[decomp_level])
 
-            for window in windows:
+            for window_i, window in enumerate(windows):
                 # Smital et al. (2013), eq. 2 and 3 (combined)
                 data_window = coef[window[0]:window[1]]
                 med_val = np.median(data_window)
                 t = med_val / .6745 * tm
-                thresh_level = np.append(thresh_level, np.array([t] * int(window[1] - window[0])))
+                window_thresh = np.array([t] * int(window[1] - window[0]))
+                thresh_level = np.append(thresh_level, window_thresh)
 
             if len(thresh_level) < data_len:
                 thresh_level = np.append(thresh_level, np.zeros(data_len - len(thresh_level)))
@@ -278,6 +280,7 @@ class Smital:
         self.data_upper['r_peaks'] = find_rr_intervals(ecg_raw=self.data_upper['xn'], fs=self.sample_rate)
         self.data_upper['rr_windows'] = flag_rr_windows(r_peaks=self.data_upper['r_peaks'])
 
+        # padding starts for all signals except data_upper['xn']
         wwf_upper_path(data_upper=self.data_upper,
                        n_decomp_levels=self.n_decomp_level,
                        use_decomp_levels=self.use_decomp_levels,
@@ -446,19 +449,19 @@ def get_rolling_snr(x: np.ndarray, s: np.ndarray, window: int, use_sum: bool = T
 
     # Equation (5), Smital 2020.
     if use_sum:
-        rolling_s_energy = bottleneck.move_sum(np.square(s), window, axis=0)[window - 1:-1]  # Trim first few NaN values.
-        rolling_w_energy = bottleneck.move_sum(np.square(w), window, axis=0)[window - 1:-1]
+        rolling_s_energy = bottleneck.move_sum(a=np.square(s), window=window, axis=0)[window - 1:]  # Trim first few NaN values.
+        rolling_w_energy = bottleneck.move_sum(a=np.square(w), window=window, axis=0)[window - 1:]
 
     if not use_sum:
-        rolling_s_energy = bottleneck.move_var(np.square(s), window, axis=0)[window - 1:-1]  # Trim first few NaN values.
-        rolling_w_energy = bottleneck.move_var(np.square(w), window, axis=0)[window - 1:-1]
+        rolling_s_energy = bottleneck.move_var(a=np.square(s), window=window, axis=0)[window - 1:]  # Trim first few NaN values.
+        rolling_w_energy = bottleneck.move_var(a=np.square(w), window=window, axis=0)[window - 1:]
 
     rolling_snr = 10 * np.log10(rolling_s_energy / rolling_w_energy)
 
     rolling_snr[np.isinf(rolling_snr)] = replace_inf_val
 
     # Apply Short-Time Averaging (STA) to SNR.
-    rolling_snr_sta = bottleneck.move_mean(rolling_snr, window, axis=0)[window - 1:-1]
+    rolling_snr_sta = bottleneck.move_mean(a=rolling_snr, window=window, axis=0)[window - 1:]
     rolling_snr_sta, *_ = pad_to_length(x=rolling_snr_sta, length=len(s), mode='edge')
 
     return rolling_snr, rolling_snr_sta
@@ -550,7 +553,8 @@ def get_wavelet_parameters_for_snr(noise: float):
     return dict_out
 
 
-def adaptive_wwf(signal, data_lower,
+def adaptive_wwf(signal,
+                 data_lower,
                  sample_rate,
                  min_snr_seg_len=5,
                  upper_ca_thresh=True,
@@ -567,7 +571,6 @@ def adaptive_wwf(signal, data_lower,
         print("========== Running AWWF pathway ==========")
 
     snr_segs = get_threshold_crossings(data_lower['snr'], WwfParams.snr_thresholds())
-    min_seg_samples = int(sample_rate * min_snr_seg_len)  ## not needed in MITBIH-NST; might be needed for free-living
 
     awwf_dict = {'zn': np.zeros_like(signal),
                  'snr_segments': snr_segs,
@@ -590,8 +593,11 @@ def adaptive_wwf(signal, data_lower,
         # Smital et al. (2013) table III
         seg_params = WwfParams.for_snr(data_lower['snr'][start_idx])
 
-        awwf_dict['params'].append([start_idx,
-                                    [seg_params.wavelet1, seg_params.wavelet2, seg_params.level1, seg_params.level2]])
+        awwf_dict['params'].append([start_idx, seg_params.wavelet1, seg_params.wavelet2,
+                                    seg_params.level1, seg_params.level2])
+
+        # window indexing to keep indexes within bounds of data ---------
+        # RR-window +/- 2-second padding to account for rolling calculations
 
         start = start_idx - pad if start_idx - pad >= 0 else 0
         start_pad = start_idx - start
@@ -604,7 +610,7 @@ def adaptive_wwf(signal, data_lower,
         seg_upper['r_peaks'] = find_rr_intervals(ecg_raw=seg_upper['xn'], fs=sample_rate)
 
         awwf_dict['r_peaks'] = np.concatenate([awwf_dict['r_peaks'],
-                                               np.array([i + start_idx for i in seg_upper['r_peaks']])])
+                                               np.array([i + start for i in seg_upper['r_peaks']])])
 
         if len(seg_upper['r_peaks']) >= 3:
             seg_upper['rr_windows'] = flag_rr_windows(r_peaks=seg_upper['r_peaks'])
@@ -743,15 +749,13 @@ def wwf_upper_path(data_upper: dict,
     data_upper['ymn_cA_threshes'], data_upper['ymn_cA_threshed'] = H(ymn=data_upper['ymn'][:, 0],
                                                                      windows=data_upper['windows'],
                                                                      tm=tm,
-                                                                     # pad_left=data_upper['crop'][0],  ##
-                                                                     pad_left=0,
+                                                                     pad_left=data_upper['crop'][0],
                                                                      apply_threshold=threshold_ca)
 
     data_upper['ymn_cD_threshes'], data_upper['ymn_cD_threshed'] = H(ymn=data_upper['ymn'][:, 1],
                                                                      windows=data_upper['windows'],
                                                                      tm=tm,
-                                                                     # pad_left=data_upper['crop'][0],  ##
-                                                                     pad_left=0,
+                                                                     pad_left=data_upper['crop'][0],
                                                                      apply_threshold=threshold_cd)
 
     # combined ymn_cA_threshed and ymn_cD_threshed into format needed for inverse SWT
@@ -921,9 +925,9 @@ def crop_dict_data(data_upper, data_lower):
                 if len(data_lower[key]) > data_len:
                     data_lower[key] = data_lower[key][data_lower['crop'][0]:data_lower['crop'][1]]
 
-    for key in ['ymn_threshed']:
+    for key in ['lambda_ymn']:  # 'ymn_threshed'
         if key in data_lower.keys():
-            if len(data_lower[key][0][0]) > len(data_upper['xn']):
+            if len(data_lower[key][0][0]) > data_len:
                 data_lower[key] = [(data_lower[key][i][0][data_lower['crop'][0]:data_lower['crop'][1]],
                                     data_lower[key][i][1][data_lower['crop'][0]:data_lower['crop'][1]])
                                    for i in range(len(data_lower[key]))]
@@ -1001,11 +1005,10 @@ subj = 'OND09_SBH0336'
 
 ecg = nimbalwear.Device()
 ecg.import_edf(f"W:/NiMBaLWEAR/OND09/wearables/device_edf_cropped/{subj}_01_BF36_Chest.edf")
-# ecg_signal = resample_signal(signal=ecg.signals[0][:int(250*3600/2)], old_rate=250, new_rate=sample_rate)
-ecg_signal = resample_signal(signal=ecg.signals[0][int(250*3600/4):int(250*3600/2)], old_rate=250, new_rate=sample_rate)
+ecg_signal = resample_signal(signal=ecg.signals[0][:int(250*3600/2)], old_rate=250, new_rate=sample_rate)
 ecg_signal = filter_highpass(signal=ecg_signal, sample_rate=sample_rate, cutoff_low=low_f_cut, order=100)
-# ecg_signal = filter_lowpass(signal=ecg_signal, sample_rate=sample_rate, cutoff_high=40, order=100)
-ecg_signal = filter_notch(signal=ecg_signal, sample_rate=sample_rate, freq=notch_cut)
+ecg_signal = filter_lowpass(signal=ecg_signal, sample_rate=sample_rate, cutoff_high=40, order=100)
+# ecg_signal = filter_notch(signal=ecg_signal, sample_rate=sample_rate, freq=notch_cut)
 
 snr_orig = nimbalwear.Device()
 snr_orig.import_edf(f"W:/NiMBaLWEAR/OND09/analytics/ecg/signal_quality/timeseries_edf/{subj}_01_snr.edf")
@@ -1029,6 +1032,7 @@ best_settings = {"upper_ca_thresh": True, "upper_cd_thresh": False,
                  "use_decomp_levels": [0, 1, 2, 3],
                  "use_snr_sum": False}
 
+# ecg_signal[500000:500500] = 100
 self = Smital(ecg_filt=ecg_signal, sample_rate=sample_rate,
               upper_ca_thresh=True, upper_cd_thresh=True,
               lower_ca_thresh=True, lower_cd_thresh=True,
@@ -1043,8 +1047,12 @@ self.data_awwf = adaptive_wwf(signal=self.data_upper['xn'],
                               data_lower=self.data_lower,
                               sample_rate=self.sample_rate,
                               min_snr_seg_len=5,
+                              upper_ca_thresh=self.upper_ca_thresh,
+                              upper_cd_thresh=self.upper_cd_thresh,
+                              #upper_cd_thresh=False,
                               lower_ca_thresh=self.lower_ca_thresh,
                               lower_cd_thresh=self.lower_cd_thresh,
+                              # lower_cd_thresh=False,
                               use_ca=self.use_ca,
                               use_cd=self.use_cd,
                               fixed_n_levels=None,
@@ -1066,12 +1074,12 @@ print(f"     = {dt / (len(ecg_signal)/sample_rate/3600):.1f} sec/hour of data")
 print()
 print(self.df_med.round(1))
 
-for arr in [self.data_upper['snr'], self.data_lower['snr'], self.data_awwf['snr']]:
-    arr = clip_array(arr=arr, min_val=None, max_val=50)
+#for arr in [self.data_upper['snr'], self.data_lower['snr'], self.data_awwf['snr']]:
+#    arr = clip_array(arr=arr, min_val=None, max_val=50)
 
-
+"""
 fig = self.plot_results(data_key=data_key, original_dict=None, mitbih=False, shade_rr_windows=True,
-                        plot_upper=True, plot_lower=True, plot_awwf=False)
+                        plot_upper=True, plot_lower=True, plot_awwf=True)
 
 try:
     r = sample_rate / 250
@@ -1086,7 +1094,7 @@ except NameError:
     pass
 
 fig.axes[1].legend(loc='upper left')
-
+"""
 
 # TODO
 # add option to only threshold certain levels
@@ -1098,21 +1106,23 @@ for row in df_cn_raw.itertuples():
     fig.axes[1].axvspan(row.Msec/1000, row.Msec/1000 + row.Length/1000, 0, 1, color='grey', alpha=.2)
 """
 
+"""
 fig, ax = plt.subplots(3, figsize=(10, 6), sharex='col')
 
 ax[0].plot(self.data_upper['xn'], color='black', label='xn')
 ax[0].plot(self.data_upper['ymn'][1, 0, :], color='red', label='cA[1]')
-
-ax[1].plot(self.data_upper['ymn_cA_threshes'][1], color='red', label='cA[1] thresholds')
-ax[1].legend()
-
-ax[2].plot(self.data_upper['ymn_cA_threshed'][1, :], color='red', label='cA[1]_threshed')
 ax[0].plot(self.data_upper['ymn_cA_threshed'][1, :], color='dodgerblue', label='cA[1]_threshed')
 
-for axis in ax:
-    axis.legend()
+ax[1].plot(self.data_upper['ymn_cA_threshes'][1], color='dodgerblue', label='cA[1] thresholds')
+ax[1].plot(self.data_upper['ymn'][1, 0, :], color='red', label='cA[1]')
 
-    for w in self.data_upper['rr_windows'][::2]:
-        axis.axvspan(w[0], w[1], 0, 1, color='grey', alpha=.2)
+ax[2].plot(self.data_upper['ymn_cA_threshed'][1, :], color='red', label='cA[1]_threshed')
+
+for axis in ax:
+    axis.legend(loc='upper left')
+
+for w in self.data_upper['rr_windows'][::2]:
+    ax[1].axvspan(w[0], w[1], 0, 1, color='grey', alpha=.2)
 
 plt.tight_layout()
+"""
