@@ -139,7 +139,7 @@ def iswt2(lambda_ymn, wavelet='bior2.2'):
     return pywt.iswt(lambda_ymn, wavelet=wavelet)
 
 
-def H(ymn, windows, pad_left=0, tm=2.8, apply_threshold=True):
+def H_beatwindows(ymn, windows, pad_left=0, tm=2.8, apply_threshold=True):
 
     coefs = np.asarray(ymn)
     coefs_shape = coefs.shape
@@ -164,6 +164,48 @@ def H(ymn, windows, pad_left=0, tm=2.8, apply_threshold=True):
 
             if len(thresh_level) < data_len:
                 thresh_level = np.append(thresh_level, np.zeros(data_len - len(thresh_level)))
+
+            threshes.append(thresh_level)
+
+        ymn_threshed = np.array([pywt.threshold(data=c, value=np.asarray(threshes[i]), mode='garrote') for
+                                 i, c in enumerate(ymn)])
+
+    if not apply_threshold:
+        ymn_threshed = ymn
+        threshes = np.zeros(data_len)
+
+    return np.asarray(threshes), np.asarray(ymn_threshed)
+
+
+def H_fixedroll(ymn: np.ndarray,
+                sample_rate: int,
+                apply_threshold: bool = True,
+                tm: float or int = 2.8,
+                n_sec: int or float = 0.6) -> np.ndarray:
+    """
+    Wavelet-domain operation corresponding to block H. Uses rolling median with fixed window
+    lengths to create wavelet thresholds
+
+    Ignore the zero division error, the number will get clipped anyways in the threshold (according to pywt code on github)
+    """
+
+    coefs = np.asarray(ymn)
+    coefs_shape = coefs.shape
+    data_len = len(coefs[0]) if coefs_shape[0] > 1 else len(coefs)
+    n_levels = coefs_shape[0]
+
+    window = int(n_sec * sample_rate)
+
+    if apply_threshold:
+        threshes = []
+
+        for decomp_level in range(n_levels):
+
+            coef = np.concatenate([np.zeros(window), np.abs(coefs[decomp_level])])
+
+            # Equation (3), Smital 2020, using sliding window
+            # thresh level padded by window size; does not need padding with upper_data['crop'][0]
+            thresh_level = bottleneck.move_median(coef, window + 1, axis=0)[window:] / 0.6745 * tm
 
             threshes.append(thresh_level)
 
@@ -248,13 +290,14 @@ class Smital:
                  use_snr_sum=False,
                  n_decomp_levels=4,
                  use_decomp_levels: list or tuple or None = None,
+                 use_rr_windows: bool = True,
+                 roll_window_sec: int or float = 0.6,
                  ):
 
         self.sample_rate = sample_rate
         self.data_upper = {'xn': ecg_filt, 'ymn': [], 'crop': [0, 0], 'r_peaks': [], 'rr_windows': [],
                            'ymn_cA_threshes': [], 'ymn_cA_threshed': [], 'ymn_cD_threshes': [], 'ymn_cD_threshed': [],
-                           'ymn_threshed': [], 's^': [], 'u^mn_cA': [], 'u^mn_cD': [], 'snr': [],
-                           'valid_beats': True}
+                           'ymn_threshed': [], 's^': [], 'u^mn_cA': [], 'u^mn_cD': [], 'snr': []}
         self.data_lower = {'ymn_cA': [], 'ymn_cD': [], 'crop': [0, 0], 'g^mn_cA': [], 'g^mn_cD': [],
                            'lambda_ymn_cA': [], 'lambda_ymn_cD': [], 'lambda_ymn': [], 'yn': [], 'snr': []}
         self.data_awwf = {'zn': [], 'snr_segments': [], 'params': [], 'snr': []}
@@ -272,6 +315,8 @@ class Smital:
         self.n_decomp_level = n_decomp_levels
         self.use_decomp_levels = sorted(use_decomp_levels) if \
             use_decomp_levels is not None else np.arange(n_decomp_levels)
+        self.use_rr_windows = use_rr_windows
+        self.roll_window_sec = roll_window_sec
 
         self.universal_params = WwfParams.universal()
 
@@ -288,6 +333,9 @@ class Smital:
                        wavelet=self.upper_wavelet,
                        threshold_ca=self.upper_ca_thresh,
                        threshold_cd=self.upper_cd_thresh,
+                       use_rr_windows=self.use_rr_windows,
+                       roll_window_sec=self.roll_window_sec,
+                       sample_rate=self.sample_rate,
                        quiet=False)
 
         self.data_lower = wwf_lower_path(data_upper=self.data_upper,
@@ -307,8 +355,8 @@ class Smital:
                                                  window=int(2 * self.sample_rate), use_sum=self.use_snr_sum)[1]
         self.data_lower['snr'] = get_rolling_snr(x=self.data_upper['xn'], s=self.data_lower['yn'],
                                                  window=int(2 * self.sample_rate), use_sum=self.use_snr_sum)[1]
-        """
-        self.data_awwf = adaptive_wwf(signal=ecg_signal,
+
+        self.data_awwf = adaptive_wwf(signal=self.data_upper['xn'],
                                       data_lower=self.data_lower,
                                       sample_rate=self.sample_rate,
                                       min_snr_seg_len=5,
@@ -316,12 +364,13 @@ class Smital:
                                       lower_cd_thresh=self.lower_cd_thresh,
                                       use_ca=self.use_ca,
                                       use_cd=self.use_cd,
+                                      use_rr_windows=self.use_rr_windows,
                                       quiet=True)
 
         self.data_awwf['snr'] = get_rolling_snr(x=self.data_upper['xn'], s=self.data_awwf['zn'],
                                                 window=int(2 * self.sample_rate), use_sum=self.use_snr_sum)[1]
 
-        self.df_med = self.calculate_median_snr_by_stage()"""
+        self.df_med = self.calculate_median_snr_by_stage()
 
     def calculate_median_snr_by_stage(self):
 
@@ -565,6 +614,7 @@ def adaptive_wwf(signal,
                  use_cd=True,
                  use_decomp_levels: int or None = None,
                  fixed_n_levels: int or None = None,
+                 use_rr_windows: bool = True,
                  quiet: bool = True):
 
     if not quiet:
@@ -613,7 +663,8 @@ def adaptive_wwf(signal,
                                                np.array([i + start for i in seg_upper['r_peaks']])])
 
         if len(seg_upper['r_peaks']) >= 3:
-            seg_upper['rr_windows'] = flag_rr_windows(r_peaks=seg_upper['r_peaks'])
+            if use_rr_windows:
+                seg_upper['rr_windows'] = flag_rr_windows(r_peaks=seg_upper['r_peaks'])
 
             if fixed_n_levels is None:
                 upper_levels = seg_params.level1
@@ -631,6 +682,8 @@ def adaptive_wwf(signal,
                            wavelet=seg_params.wavelet1,
                            threshold_ca=upper_ca_thresh,
                            threshold_cd=upper_cd_thresh,
+                           use_rr_windows=use_rr_windows,
+                           sample_rate=sample_rate,
                            quiet=quiet)
 
             seg_dict = wwf_lower_path(data_upper=seg_upper,
@@ -669,6 +722,9 @@ def wwf_upper_path(data_upper: dict,
                    wavelet: str = 'bior2.2',
                    threshold_cd: bool = True,
                    threshold_ca: bool = True,
+                   use_rr_windows: bool = True,
+                   sample_rate: int = 500,
+                   roll_window_sec: int or float = 0.6,
                    quiet: bool = True):
     """ Upper path in Smital et al. (2013) figure 2. Calls swt1(), H(), iswt1(), and swt2().
 
@@ -738,25 +794,41 @@ def wwf_upper_path(data_upper: dict,
 
     data_upper['crop'] = [padding_left, -1 if padding_right == 0 else -padding_right]
 
-    # adjust rr_window indexes to account for padding from above
-    # data_upper['r_peaks'] = data_upper['r_peaks'] + data_upper['crop'][0]
-    data_upper['windows'] = [[i[0] + data_upper['crop'][0], i[1] + data_upper['crop'][0]] for
-                             i in data_upper['rr_windows']]
+    # Method that calculates thresholds using windows that contain 1 heartbeat --------
+    if use_rr_windows:
 
-    # Smital et al. (2013) eq. 2 and 3
-    # estimates noise using median of wavelet coefficients' median value and two constants
-    # thresholds wavelet coefficients using calculated thresholds
-    data_upper['ymn_cA_threshes'], data_upper['ymn_cA_threshed'] = H(ymn=data_upper['ymn'][:, 0],
-                                                                     windows=data_upper['windows'],
-                                                                     tm=tm,
-                                                                     pad_left=data_upper['crop'][0],
-                                                                     apply_threshold=threshold_ca)
+        # adjust rr_window indexes to account for padding from above
+        data_upper['windows'] = [[i[0] + data_upper['crop'][0], i[1] + data_upper['crop'][0]] for
+                                 i in data_upper['rr_windows']]
 
-    data_upper['ymn_cD_threshes'], data_upper['ymn_cD_threshed'] = H(ymn=data_upper['ymn'][:, 1],
-                                                                     windows=data_upper['windows'],
-                                                                     tm=tm,
-                                                                     pad_left=data_upper['crop'][0],
-                                                                     apply_threshold=threshold_cd)
+        # Smital et al. (2013) eq. 2 and 3
+        # estimates noise using median of wavelet coefficients' median value and two constants
+        # thresholds wavelet coefficients using calculated thresholds
+        data_upper['ymn_cA_threshes'], data_upper['ymn_cA_threshed'] = H_beatwindows(ymn=data_upper['ymn'][:, 0],
+                                                                                     windows=data_upper['windows'],
+                                                                                     tm=tm,
+                                                                                     pad_left=data_upper['crop'][0],
+                                                                                     apply_threshold=threshold_ca)
+
+        data_upper['ymn_cD_threshes'], data_upper['ymn_cD_threshed'] = H_beatwindows(ymn=data_upper['ymn'][:, 1],
+                                                                                     windows=data_upper['windows'],
+                                                                                     tm=tm,
+                                                                                     pad_left=data_upper['crop'][0],
+                                                                                     apply_threshold=threshold_cd)
+
+    if not use_rr_windows:
+
+        data_upper['ymn_cA_threshes'], data_upper['ymn_cA_threshed'] = H_fixedroll(ymn=data_upper['ymn'][:, 0],
+                                                                                   sample_rate=sample_rate,
+                                                                                   apply_threshold=threshold_ca,
+                                                                                   tm=tm,
+                                                                                   n_sec=roll_window_sec)
+
+        data_upper['ymn_cD_threshes'], data_upper['ymn_cD_threshed'] = H_fixedroll(ymn=data_upper['ymn'][:, 1],
+                                                                                   sample_rate=sample_rate,
+                                                                                   apply_threshold=threshold_ca,
+                                                                                   tm=tm,
+                                                                                   n_sec=roll_window_sec)
 
     # combined ymn_cA_threshed and ymn_cD_threshed into format needed for inverse SWT
     data_upper['ymn_threshed'] = [[data_upper['ymn_cA_threshed'][i], data_upper['ymn_cD_threshed'][i]] for
@@ -1040,9 +1112,11 @@ self = Smital(ecg_filt=ecg_signal, sample_rate=sample_rate,
               upper_wavelet='bior2.2', lower_wavelet='bior2.2',
               n_decomp_levels=4,
               use_decomp_levels=None,
-              use_snr_sum=False)
+              use_snr_sum=False,
+              use_rr_windows=False,
+              roll_window_sec=0.6)
 self.run_process()
-
+"""
 self.data_awwf = adaptive_wwf(signal=self.data_upper['xn'],
                               data_lower=self.data_lower,
                               sample_rate=self.sample_rate,
@@ -1061,7 +1135,7 @@ self.data_awwf = adaptive_wwf(signal=self.data_upper['xn'],
 self.data_awwf['snr'] = get_rolling_snr(x=self.data_upper['xn'], s=self.data_awwf['zn'],
                                         window=int(2 * self.sample_rate), use_sum=self.use_snr_sum)[1]
 
-self.df_med = self.calculate_median_snr_by_stage()
+self.df_med = self.calculate_median_snr_by_stage()"""
 
 # df_settings = append_settings_csv(smital_obj=data, pathway="C:/Users/ksweber/Desktop/smital_settings.csv")
 
