@@ -201,6 +201,7 @@ def H_fixedroll(ymn: np.ndarray,
 
         for decomp_level in range(n_levels):
 
+            # pads window with zeros that get removed post-calculation
             coef = np.concatenate([np.zeros(window), np.abs(coefs[decomp_level])])
 
             # Equation (3), Smital 2020, using sliding window
@@ -211,6 +212,9 @@ def H_fixedroll(ymn: np.ndarray,
 
         ymn_threshed = np.array([pywt.threshold(data=c, value=np.asarray(threshes[i]), mode='garrote') for
                                  i, c in enumerate(ymn)])
+
+        for i in ymn_threshed:
+            i[np.argwhere(np.isnan(i))] = 0
 
     if not apply_threshold:
         ymn_threshed = ymn
@@ -239,6 +243,7 @@ def WH(umn_cA, umn_cD, umn_ca_noise, umn_cd_noise, tm):
 
         cD = cD_sq / (cD_sq + cD_noise_sq)
         cD = np.nan_to_num(x=cD, nan=0)
+
         gm_ca.append(cA)
         gm_cd.append(cD)
 
@@ -347,6 +352,8 @@ class Smital:
                                          threshold_cd=self.lower_cd_thresh,
                                          use_ca=self.use_ca,
                                          use_cd=self.use_cd,
+                                         use_rr_windows=self.use_rr_windows,
+                                         roll_window_sec=self.roll_window_sec,
                                          quiet=False)
 
         crop_dict_data(data_upper=self.data_upper, data_lower=self.data_lower)
@@ -365,6 +372,7 @@ class Smital:
                                       use_ca=self.use_ca,
                                       use_cd=self.use_cd,
                                       use_rr_windows=self.use_rr_windows,
+
                                       quiet=True)
 
         self.data_awwf['snr'] = get_rolling_snr(x=self.data_upper['xn'], s=self.data_awwf['zn'],
@@ -696,6 +704,8 @@ def adaptive_wwf(signal,
                                       threshold_cd=lower_cd_thresh,
                                       use_ca=use_ca,
                                       use_cd=use_cd,
+                                      use_rr_windows=False,
+                                      roll_window_sec=1,  # value not used
                                       quiet=quiet)
 
             seg_dict['yn'] = seg_dict['yn'][seg_dict['crop'][0]:seg_dict['crop'][1]]
@@ -851,6 +861,41 @@ def wwf_upper_path(data_upper: dict,
     data_upper['u^mn_cD'] = np.array([coef[1] for coef in data_upper['u^mn']])
     del data_upper['u^mn']
 
+    if use_rr_windows:
+
+        # adjust rr_window indexes to account for padding from above
+        data_upper['windows'] = [[i[0] + data_upper['crop'][0], i[1] + data_upper['crop'][0]] for
+                                 i in data_upper['rr_windows']]
+
+        # Smital et al. (2013) eq. 2 and 3
+        # estimates noise using median of wavelet coefficients' median value and two constants
+        # thresholds wavelet coefficients using calculated thresholds
+        data_upper['u^mn_cA_threshes'], _ = H_beatwindows(ymn=data_upper['u^mn_cA'],
+                                                          windows=data_upper['windows'],
+                                                          tm=1,  # tm=1 applies Eq. 2, not 3
+                                                          pad_left=data_upper['crop'][0],
+                                                          apply_threshold=threshold_ca)
+
+        data_upper['u^mn_cD_threshes'], _ = H_beatwindows(ymn=data_upper['u^mn_cD'],
+                                                          windows=data_upper['windows'],
+                                                          tm=1,  # tm=1 applies Eq. 2, not 3
+                                                          pad_left=data_upper['crop'][0],
+                                                          apply_threshold=threshold_ca)
+
+    if not use_rr_windows:
+
+        data_upper['u^mn_cA_threshes'], _ = H_fixedroll(ymn=data_upper['u^mn_cA'],
+                                                        sample_rate=sample_rate,
+                                                        apply_threshold=threshold_ca,
+                                                        tm=1,
+                                                        n_sec=roll_window_sec)
+
+        data_upper['u^mn_cD_threshes'], _ = H_fixedroll(ymn=data_upper['u^mn_cD'],
+                                                        sample_rate=sample_rate,
+                                                        apply_threshold=threshold_ca,
+                                                        tm=1,
+                                                        n_sec=roll_window_sec)
+
 
 def wwf_lower_path(data_upper: dict,
                    n_decomp_levels: int = 4,
@@ -861,6 +906,8 @@ def wwf_lower_path(data_upper: dict,
                    threshold_ca: bool = True,
                    use_ca: bool = True,
                    use_cd: bool = True,
+                   use_rr_windows: bool = True,
+                   roll_window_sec: int or float = 0.6,
                    quiet: bool = True):
     """ Lower path in Smital et al. (2013) figure 2. Calls swt2(), HW(), and iswt2().
 
@@ -919,17 +966,61 @@ def wwf_lower_path(data_upper: dict,
     data_lower['ymn_cA'] = ymn[:, 0]
     data_lower['ymn_cD'] = ymn[:, 1]
 
+    if use_rr_windows:
+
+        # Smital et al. (2013) eq. 2 and 3
+        # estimates noise using median of wavelet coefficients' median value and two constants
+        # thresholds wavelet coefficients using calculated thresholds
+        data_lower['ymn_cA_threshes'], _ = H_beatwindows(ymn=data_lower['ymn_cA'],
+                                                         windows=data_upper['rr_windows'],
+                                                         tm=1,  # tm=1 applies Smital et al. 2013 Eq. 2, not 3
+                                                         pad_left=data_upper['crop'][0],
+                                                         apply_threshold=threshold_ca)
+
+        data_lower['ymn_cD_threshes'], _ = H_beatwindows(ymn=data_lower['ymn_cD'],
+                                                         windows=data_upper['rr_windows'],
+                                                         tm=1,  # tm=1 applies Smital et al. 2013 Eq. 2, not 3
+                                                         pad_left=data_upper['crop'][0],
+                                                         apply_threshold=threshold_ca)
+
+    if not use_rr_windows:
+
+        data_lower['ymn_cA_threshes'], _ = H_fixedroll(ymn=data_lower['ymn_cA'],
+                                                       sample_rate=sample_rate,
+                                                       apply_threshold=threshold_ca,
+                                                       tm=1,  # tm=1 applies Smital et al. 2013 Eq. 2, not 3
+                                                       n_sec=roll_window_sec)
+
+        data_lower['ymn_cD_threshes'], _ = H_fixedroll(ymn=data_lower['ymn_cD'],
+                                                       sample_rate=sample_rate,
+                                                       apply_threshold=threshold_ca,
+                                                       tm=1,  # tm=1 applies Smital et al. 2013 Eq. 2, not 3
+                                                       n_sec=roll_window_sec)
+
     # crop indexes to undo signal padding (required for SWT)
     data_lower['crop'] = [padding_left, -1 if padding_right == 0 else -padding_right]
 
     # Smital et al. (2013) eq. 4 -------------------
     # Wiener correction factor based on thresholds
     # tm set to 1 since it is set to 1 in the call to H() for umn_cA_noise/umn_cD_noise estimates
+
+    # what I've been running mostly ##
     data_lower['g^mn_cA'], data_lower['g^mn_cD'] = WH(umn_cA=data_upper['u^mn_cA'],
                                                       umn_cD=data_upper['u^mn_cD'],
-                                                      umn_ca_noise=data_upper['ymn_cA_threshes']/tm,
-                                                      umn_cd_noise=data_upper['ymn_cD_threshes']/tm,
+                                                      #umn_ca_noise=data_upper['u^mn_cA_threshes'],  ##ymn/tm
+                                                      #umn_cd_noise=data_upper['u^mn_cD_threshes'],  ##ymn/tm
+                                                      umn_ca_noise=data_lower['ymn_cA_threshes'],
+                                                      umn_cd_noise=data_lower['ymn_cD_threshes'],
                                                       tm=1)
+                                                      
+    data_lower['g^mn_cA'], data_lower['g^mn_cD'] = WH(umn_cA=data_upper['u^mn_cA'],
+                                                      umn_cD=data_upper['u^mn_cD'],
+                                                      #umn_ca_noise=data_upper['u^mn_cA_threshes'],  #ymn/tm
+                                                      #umn_cd_noise=data_upper['u^mn_cD_threshes'],  #ymn/tm
+                                                      umn_ca_noise=data_lower['ymn_cA_threshes'],
+                                                      umn_cd_noise=data_lower['ymn_cD_threshes'],
+                                                      tm=1)
+
 
     # Smital et al. (2013) eq. 5
     # Applies Wiener correction factor to wavelet coefficients ymn_cA/ymn_cD --> 'modified coefficients'
@@ -1069,8 +1160,8 @@ low_f_cut = .67
 notch_cut = 60
 
 # Preprocessing ---------
-
 t0 = datetime.datetime.now()
+
 """
 import nimbalwear
 subj = 'OND09_SBH0336'
@@ -1104,8 +1195,21 @@ best_settings = {"upper_ca_thresh": True, "upper_cd_thresh": False,
                  "use_decomp_levels": [0, 1, 2, 3],
                  "use_snr_sum": False}
 
-# ecg_signal[500000:500500] = 100
 self = Smital(ecg_filt=ecg_signal, sample_rate=sample_rate,
+              upper_ca_thresh=True, upper_cd_thresh=True,
+              lower_ca_thresh=True, lower_cd_thresh=True,
+              use_ca=True, use_cd=True,
+              upper_wavelet='bior2.2', lower_wavelet='bior2.2',
+              # upper_wavelet='db4', lower_wavelet='sym4',
+              n_decomp_levels=4,
+              use_decomp_levels=None,
+              use_snr_sum=False,
+              use_rr_windows=False,
+              roll_window_sec=1  # .6
+              )
+self.run_process()
+"""
+self2 = Smital(ecg_filt=ecg_signal, sample_rate=sample_rate,
               upper_ca_thresh=True, upper_cd_thresh=True,
               lower_ca_thresh=True, lower_cd_thresh=True,
               use_ca=True, use_cd=True,
@@ -1115,29 +1219,9 @@ self = Smital(ecg_filt=ecg_signal, sample_rate=sample_rate,
               use_snr_sum=False,
               use_rr_windows=False,
               roll_window_sec=0.6)
-self.run_process()
+self2.run_process()
 """
-self.data_awwf = adaptive_wwf(signal=self.data_upper['xn'],
-                              data_lower=self.data_lower,
-                              sample_rate=self.sample_rate,
-                              min_snr_seg_len=5,
-                              upper_ca_thresh=self.upper_ca_thresh,
-                              upper_cd_thresh=self.upper_cd_thresh,
-                              #upper_cd_thresh=False,
-                              lower_ca_thresh=self.lower_ca_thresh,
-                              lower_cd_thresh=self.lower_cd_thresh,
-                              # lower_cd_thresh=False,
-                              use_ca=self.use_ca,
-                              use_cd=self.use_cd,
-                              fixed_n_levels=None,
-                              quiet=True)
-
-self.data_awwf['snr'] = get_rolling_snr(x=self.data_upper['xn'], s=self.data_awwf['zn'],
-                                        window=int(2 * self.sample_rate), use_sum=self.use_snr_sum)[1]
-
-self.df_med = self.calculate_median_snr_by_stage()"""
-
-# df_settings = append_settings_csv(smital_obj=data, pathway="C:/Users/ksweber/Desktop/smital_settings.csv")
+# df_settings = append_settings_csv(smital_obj=self, pathway="C:/Users/ksweber/Desktop/smital_settings.csv")
 
 t1 = datetime.datetime.now()
 dt = (t1 - t0).total_seconds()
@@ -1200,3 +1284,23 @@ for w in self.data_upper['rr_windows'][::2]:
 
 plt.tight_layout()
 """
+
+fig, ax = plt.subplots(4, sharex='col', figsize=(12, 8))
+ax[0].plot(self.data_upper['xn'], color='black', label='preproc.')
+
+ax[1].plot(self.data_upper['xn'], color='black', label='preproc.')
+ax[2].plot(self.data_upper['xn'], color='black', label='preproc.')
+
+ax[0].plot(self.data_upper['s^'], color='dodgerblue', label='beat_windows')
+ax[1].plot(self.data_lower['yn'], color='red', label='beat_windows')
+ax[2].plot(self.data_awwf['zn'], color='orange', label='beat_windows')
+
+ax[3].plot(self.data_upper['snr'], color='dodgerblue')
+ax[3].plot(self.data_lower['snr'], color='red')
+ax[3].plot(self.data_awwf['snr'], color='orange')
+ax[3].plot(noise, color='black')
+
+for ax_i, val in enumerate(['upper path', 'lower path', 'awwf']):
+    ax[ax_i].legend(loc='upper left')
+    ax[ax_i].set_ylabel(val)
+plt.tight_layout()
