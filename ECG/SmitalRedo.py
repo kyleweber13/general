@@ -388,11 +388,13 @@ class Smital:
         self.data_awwf = adaptive_wwf(signal=self.data_upper['xn'],
                                       data_lower=self.data_lower,
                                       sample_rate=self.sample_rate,
-                                      min_snr_seg_len=5,
+                                      upper_ca_thresh=self.upper_ca_thresh,
+                                      upper_cd_thresh=self.upper_cd_thresh,
                                       lower_ca_thresh=self.lower_ca_thresh,
                                       lower_cd_thresh=self.lower_cd_thresh,
                                       use_ca=self.use_ca,
                                       use_cd=self.use_cd,
+                                      use_decomp_levels=self.use_decomp_levels,
                                       use_rr_windows=self.use_rr_windows,
                                       fixed_tm=self.fixed_tm,
                                       fixed_n_levels=self.fixed_awwf_levels if \
@@ -636,14 +638,13 @@ def get_wavelet_parameters_for_snr(noise: float):
     return dict_out
 
 
-def adaptive_wwf(signal,
-                 data_lower,
-                 sample_rate,
-                 min_snr_seg_len=5,
+def adaptive_wwf(signal: np.array or list or tuple,
+                 data_lower: dict,
+                 sample_rate: int,
                  upper_ca_thresh=True,
-                 upper_cd_thresh=False,
+                 upper_cd_thresh=True,
                  lower_ca_thresh=True,
-                 lower_cd_thresh=False,
+                 lower_cd_thresh=True,
                  use_ca=True,
                  use_cd=True,
                  use_decomp_levels: int or None = None,
@@ -1188,7 +1189,7 @@ def plot_stft(data, sample_rate, f, t, Zxx):
 """ ==================================== FUNCTION CALLS ==================================== """
 
 sample_rate = 500
-data_key = '00'
+data_key = '12'
 low_f_cut = 3  ## .67
 notch_cut = 60
 
@@ -1216,7 +1217,7 @@ ecg_signal = resample_signal(signal=nst_data[data_key]['ecg'], old_rate=360, new
 ecg_signal = filter_highpass(signal=ecg_signal, sample_rate=sample_rate, cutoff_low=low_f_cut, order=100)
 ecg_signal = filter_notch(signal=ecg_signal, sample_rate=sample_rate, freq=notch_cut)
 
-noise = generate_timeseries_noise_value(signal=ecg_signal, noise_key=data_key, sample_rate=sample_rate, noise_indexes=(300, 540, 780, 1020, 1260, 1500, 1740))
+gs_snr = generate_timeseries_noise_value(signal=ecg_signal, noise_key=data_key, sample_rate=sample_rate, noise_indexes=(300, 540, 780, 1020, 1260, 1500, 1740))
 
 nst_data[data_key]['annots']['idx'] = [int(i * sample_rate / 360) for i in nst_data[data_key]['annots']['idx']]
 # nst_snr_og[data_key]['snr'] = resample_signal(signal=nst_snr_og[data_key]['snr'], old_rate=360, new_rate=sample_rate)
@@ -1225,12 +1226,15 @@ nst_data[data_key]['annots']['idx'] = [int(i * sample_rate / 360) for i in nst_d
 
 # plt.close("all")
 
-best_settings = {"upper_ca_thresh": True, "upper_cd_thresh": False,
+best_settings = {'low_f_cut': 3,
+                 "upper_ca_thresh": True, "upper_cd_thresh": False,
                  "lower_ca_thresh": True, 'lower_cd_thresh': False,
                  'use_ca': True, 'use_cd': True,
-                 'upper_wavelet': 'bior2.2', 'lower_wavelet': 'bior2.2',
-                 "use_decomp_levels": [0, 1, 2, 3],
+                 'swt1_wavelet': 'bior2.2', 'swt2_wavelet': 'bior2.2',
+                 'swt3_wavelet': 'db4', 'swt4_wavelet': 'sym4',
+                 'n_decomp_levels': 4, "use_decomp_levels": None,
                  "use_snr_sum": False,
+                 'use_rr_windows': True,
                  'fixed_awwf_levels': None,
                  'fixed_tm': None
                  }
@@ -1247,7 +1251,7 @@ self = Smital(subj=subj,
               use_decomp_levels=None,
               use_snr_sum=False,
               fixed_awwf_levels=None,
-              use_rr_windows=False,
+              use_rr_windows=True,
               roll_window_sec=.6,
               fixed_tm=None,
               )
@@ -1271,30 +1275,6 @@ for i in ['min', '50%', 'max']:
     print(f"\n{i} SNR values ------------")
     print(self.df_stats[i].round(2))
 
-#for arr in [self.data_upper['snr'], self.data_lower['snr'], self.data_awwf['snr']]:
-#    arr = clip_array(arr=arr, min_val=None, max_val=50)
-
-"""
-fig = self.plot_results(data_key=data_key, original_dict=None, mitbih=False, shade_rr_windows=True,
-                        plot_upper=True, plot_lower=True, plot_awwf=True)
-
-try:
-    r = sample_rate / 250
-    l = len(self.data_upper['xn'])
-    fig.axes[1].plot(np.arange(int(l / r))/250, snr_orig.signals[0][:int(l / r)], color='black', label='original')
-except NameError:
-    pass
-
-try:
-    fig.axes[1].plot(np.arange(len(noise))/sample_rate, noise, color='black', label='true')
-except NameError:
-    pass
-
-fig.axes[1].legend(loc='upper left')
-"""
-
-# TODO
-# add option to only threshold certain levels
 """
 df_cn = pd.read_csv(f"W:/OND09 (HANDDS-ONT)/Incidental findings/cardiac_navigator_screened/{subj}_01_CardiacNavigator_Screened.csv")
 df_cn_raw = pd.read_csv(f"W:/OND09 (HANDDS-ONT)/Incidental findings/CardiacNavigator/{subj}_Events.csv", delimiter=';')
@@ -1303,62 +1283,101 @@ for row in df_cn_raw.itertuples():
     fig.axes[1].axvspan(row.Msec/1000, row.Msec/1000 + row.Length/1000, 0, 1, color='grey', alpha=.2)
 """
 
+
+def plot_thresholds(coef, level):
+    fig, ax = plt.subplots(3, figsize=(10, 6), sharex='col')
+
+    ax[0].plot(self.data_upper['xn'], color='black', label='xn')
+    ax[0].plot(self.data_upper['ymn'][level, 0 if coef == 'cA' else 1, :], color='red', label=f'{coef}[{level}]')
+    ax[0].plot(self.data_upper[f'ymn_{coef}_threshed'][level, :], color='dodgerblue', label=f'{coef}[{level}]_threshed')
+
+    ax[1].plot(self.data_upper[f'ymn_{coef}_threshes'][level], color='orange', label=f'{coef}[{level}]_thresholds')
+    ax[1].plot(self.data_upper['ymn'][level, 0 if coef == 'cA' else 1, :], color='red', label=f'{coef}[{level}]')
+
+    ax[2].plot(self.data_upper[f'ymn_{coef}_threshed'][level, :], color='dodgerblue', label=f'{coef}[{level}]_threshed')
+
+    for axis in ax:
+        axis.legend(loc='upper left')
+
+    for w in self.data_upper['rr_windows'][::2]:
+        ax[1].axvspan(w[0], w[1], 0, 1, color='grey', alpha=.2)
+
+    plt.tight_layout()
+
+    return fig
+
+
+# plot_thresholds(coef='cA', level=1)
+
+
+def plot_results():
+    fig, ax = plt.subplots(4, sharex='col', figsize=(12, 8))
+    ax[0].plot(self.data_upper['xn'], color='black', label='preproc.')
+    ax[1].plot(self.data_upper['xn'], color='black', label='preproc.')
+    ax[2].plot(self.data_upper['xn'], color='black', label='preproc.')
+
+    ax[0].plot(self.data_upper['s^'], color='dodgerblue', label='upper_s^')
+    ax[1].plot(self.data_lower['yn'], color='red', label='lower_yn')
+    ax[2].plot(self.data_awwf['zn'], color='orange', label='awwf_zn')
+
+    ax[3].plot(self.data_upper['snr'], color='dodgerblue', label='upper')
+    ax[3].plot(self.data_lower['snr'], color='red', label='lower')
+    ax[3].plot(self.data_awwf['snr'], color='orange', label='awwf_roll')
+    ax[3].plot(self.data_awwf['snr_raw'], color='grey', label='awwf')
+
+    try:
+        ax[3].plot(np.arange(len(nst_snr[data_key]['1s'])) * sample_rate,
+                   nst_snr[data_key]['1s'], color='fuchsia', label='original')
+
+        # flags annotated beats as 'normal' or not normal
+        df_n = nst_data[data_key]['annots'].loc[nst_data[data_key]['annots']['beat_type'] == 'N']
+        ax[0].scatter(df_n['idx'], ecg_signal[df_n['idx']] + .5, color='limegreen', marker='v', label='sinus')
+        df_arr = nst_data[data_key]['annots'].loc[nst_data[data_key]['annots']['beat_type'] != 'N']
+        ax[0].scatter(df_arr['idx'], ecg_signal[df_arr['idx']] + .5, color='red', marker='x', label='arrhythmic')
+        del df_n, df_arr
+    except:
+        pass
+
+    ax[-1].axhspan(0, 1, 5, 18, color='green', alpha=.15)
+
+    ax[3].plot(gs_snr, color='black', label='true_snr')
+    shade_noise_on_plot(ax, sample_rate, 'datapoint')
+
+    for ax_i, val in enumerate(['upper path', 'lower path', 'awwf', 'snr']):
+        ax[ax_i].legend(loc='upper left')
+        ax[ax_i].set_ylabel(val)
+    plt.tight_layout()
+
+    return fig
+
+
+def calculate_snr_beats(df, snr, window_samples):
+
+    window_samples = int(window_samples)
+    snr_len = len(snr)
+    s = []
+
+    for row in df.itertuples():
+        start_idx = row.idx - window_samples if row.idx - window_samples >= 0 else 0
+        end_idx = row.idx + window_samples if row.idx + window_samples < snr_len else -1
+
+        w = snr[start_idx:end_idx]
+        m = np.mean(w)
+
+        s.append(m)
+
+    df['snr'] = s
+
+
 """
-fig, ax = plt.subplots(3, figsize=(10, 6), sharex='col')
+calculate_snr_beats(df=nst_data[data_key]['annots'], snr=self.data_awwf['snr_raw'], window_samples=sample_rate * .05)
+nst_data[data_key]['annots']['true_snr'] = gs_snr[nst_data[data_key]['annots']['idx']]
 
-ax[0].plot(self.data_upper['xn'], color='black', label='xn')
-ax[0].plot(self.data_upper['ymn'][1, 0, :], color='red', label='cA[1]')
-ax[0].plot(self.data_upper['ymn_cA_threshed'][1, :], color='dodgerblue', label='cA[1]_threshed')
-
-ax[1].plot(self.data_upper['ymn_cA_threshes'][1], color='dodgerblue', label='cA[1] thresholds')
-ax[1].plot(self.data_upper['ymn'][1, 0, :], color='red', label='cA[1]')
-
-ax[2].plot(self.data_upper['ymn_cA_threshed'][1, :], color='red', label='cA[1]_threshed')
-
-for axis in ax:
-    axis.legend(loc='upper left')
-
-for w in self.data_upper['rr_windows'][::2]:
-    ax[1].axvspan(w[0], w[1], 0, 1, color='grey', alpha=.2)
-
-plt.tight_layout()
-"""
-
-fig, ax = plt.subplots(4, sharex='col', figsize=(12, 8))
-ax[0].plot(self.data_upper['xn'], color='black', label='preproc.')
-ax[1].plot(self.data_upper['xn'], color='black', label='preproc.')
-ax[2].plot(self.data_upper['xn'], color='black', label='preproc.')
-
-ax[0].plot(self.data_upper['s^'], color='dodgerblue', label='upper_s^')
-ax[1].plot(self.data_lower['yn'], color='red', label='lower_yn')
-ax[2].plot(self.data_awwf['zn'], color='orange', label='awwf_zn')
-# ax[2].plot(self.data_upper['xn'] - self.data_awwf['zn'], color='grey', label='est. noise')
-
-ax[3].plot(self.data_upper['snr'], color='dodgerblue', label='upper')
-ax[3].plot(self.data_lower['snr'], color='red', label='lower')
-ax[3].plot(self.data_awwf['snr'], color='orange', label='awwf_roll')
-# ax[3].plot(self.data_awwf['snr_raw'], color='grey', label='awwf')
-
-ax[-1].axhspan(0, 1, 5, 18, color='green', alpha=.15)
-
-ax[3].plot(noise, color='black', label='true_snr')
-shade_noise_on_plot(ax, sample_rate, 'datapoint')
-
-try:
-    ax[-1].plot(nst_snr_og[data_key]['snr'][:len(self.data_awwf['snr'])], color='fuchsia', label='original')
-except KeyError:
-    pass
-
-for ax_i, val in enumerate(['upper path', 'lower path', 'awwf', 'snr']):
-    ax[ax_i].legend(loc='upper left')
-    ax[ax_i].set_ylabel(val)
-plt.tight_layout()
-
-
-"""
-# flags annotated beats as 'normal' or not normal
-for row in nst_data[data_key]['annots'].loc[nst_data[data_key]['annots']['beat_type'] == 'N'].itertuples():
-    ax[0].scatter(row.idx, ecg_signal[row.idx] + 1, color='limegreen', marker='v')
-for row in nst_data[data_key]['annots'].loc[nst_data[data_key]['annots']['beat_type'] != 'N'].itertuples():
-    ax[0].scatter(row.idx, ecg_signal[row.idx] + 1, color='red', marker='x')
+fig, ax = plt.subplots(1)
+nst_data[data_key]['annots'].boxplot(by=['true_snr', 'beat_type'], column='snr', ax=ax)
+ax.set_ylabel("SNR")
+plt.suptitle("MITBIH119 (12dB noise): Sinus vs. Arrhythmic Beats")
+ax.set_title("")
+ax.plot([1, 2, 3, 4], [int(data_key)] * 4, color='red', linestyle='dashed')
+ax.plot([5, 6, 7, 8], [24] * 4, color='limegreen', linestyle='dashed')
 """
